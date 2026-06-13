@@ -44,6 +44,18 @@ cd llm-veil
 cargo install --path .
 ```
 
+`veil` バイナリは `~/.cargo/bin/` にインストールされます。PATH が通っていない場合は `~/.zshrc`（または `~/.bashrc`）に以下を追加してください:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+反映:
+
+```bash
+source ~/.zshrc
+```
+
 ビルドには Rust 1.85+ が必要です。
 
 ## 使い方
