@@ -1,14 +1,14 @@
+use crate::injector::Injector;
+use crate::path_guard::PathGuard;
+use crate::redactor::Redactor;
+use crate::stats::Stats;
+use crate::truncator::truncate;
+use chrono::Utc;
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use wait_timeout::ChildExt;
 use uuid::Uuid;
-use chrono::Utc;
-use crate::path_guard::PathGuard;
-use crate::redactor::Redactor;
-use crate::injector::Injector;
-use crate::stats::Stats;
-use crate::truncator::truncate;
+use wait_timeout::ChildExt;
 
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -25,13 +25,19 @@ pub fn execute_command(
     timeout_duration: Duration,
 ) -> Result<ExecutionResult, io::Error> {
     if command_args.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Empty command arguments"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Empty command arguments",
+        ));
     }
 
     // 危険パスのブロックチェック
     for arg in command_args {
         if path_guard.should_block(arg) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Access to blocked path was denied"));
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Access to blocked path was denied",
+            ));
         }
     }
 
@@ -72,22 +78,21 @@ pub fn execute_command(
     let redacted_stdout = redactor.redact(&raw_stdout);
     let redacted_stderr = redactor.redact(&raw_stderr);
 
-    // redactions のカウント (増えた [REDACTED_SECRET] の数)
-    let before_redacts = raw_stdout.matches("[REDACTED_SECRET]").count() + raw_stderr.matches("[REDACTED_SECRET]").count();
-    let after_redacts = redacted_stdout.matches("[REDACTED_SECRET]").count() + redacted_stderr.matches("[REDACTED_SECRET]").count();
-    let redactions = after_redacts.saturating_sub(before_redacts);
+    let redactions = Redactor::count_redactions(&raw_stdout, &redacted_stdout)
+        + Redactor::count_redactions(&raw_stderr, &redacted_stderr);
 
     // インジェクションの検出
-    let prompt_injection_warnings = injector.detect_injection(&redacted_stdout) + injector.detect_injection(&redacted_stderr);
+    let prompt_injection_warnings =
+        injector.detect_injection(&redacted_stdout) + injector.detect_injection(&redacted_stderr);
 
     // トランケート (最大12,000文字)
     let max_chars = 12000;
     let final_stdout = truncate(&redacted_stdout, max_chars);
     let final_stderr = redacted_stderr;
-    
+
     let raw_bytes = raw_stdout.len() + raw_stderr.len();
     let returned_bytes = final_stdout.len() + final_stderr.len();
-    
+
     let reduction = if raw_bytes > 0 {
         ((raw_bytes as f64 - returned_bytes as f64) / raw_bytes as f64) * 100.0
     } else {
@@ -99,7 +104,7 @@ pub fn execute_command(
 
     let stats = Stats {
         run_id: Uuid::new_v4().to_string(),
-        command: Some(command_args.join(" ")),
+        command: Some(redactor.redact(&command_args.join(" "))),
         exit_code,
         raw_bytes,
         returned_bytes,
@@ -131,7 +136,13 @@ mod tests {
         let injector = Injector::new();
 
         let args = vec!["echo".to_string(), "hello".to_string()];
-        let result = execute_command(&args, &path_guard, &redactor, &injector, Duration::from_secs(5));
+        let result = execute_command(
+            &args,
+            &path_guard,
+            &redactor,
+            &injector,
+            Duration::from_secs(5),
+        );
 
         assert!(result.is_ok());
         let res = result.unwrap();
@@ -148,7 +159,13 @@ mod tests {
 
         // タイムアウトするはずのコマンド
         let args = vec!["sleep".to_string(), "10".to_string()];
-        let result = execute_command(&args, &path_guard, &redactor, &injector, Duration::from_millis(100));
+        let result = execute_command(
+            &args,
+            &path_guard,
+            &redactor,
+            &injector,
+            Duration::from_millis(100),
+        );
 
         assert!(result.is_ok());
         let res = result.unwrap();
@@ -163,10 +180,45 @@ mod tests {
 
         // 危険ファイルを引数に指定して実行
         let args = vec!["cat".to_string(), ".env".to_string()];
-        let result = execute_command(&args, &path_guard, &redactor, &injector, Duration::from_secs(5));
+        let result = execute_command(
+            &args,
+            &path_guard,
+            &redactor,
+            &injector,
+            Duration::from_secs(5),
+        );
 
         // ブロックされた場合はエラーを返す
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn test_execute_redacts_secret_in_command_metadata() {
+        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let redactor = Redactor::new();
+        let injector = Injector::new();
+
+        let args = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf 'SECRET_KEY=12345'".to_string(),
+        ];
+        let result = execute_command(
+            &args,
+            &path_guard,
+            &redactor,
+            &injector,
+            Duration::from_secs(5),
+        );
+
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        let command = res.stats.command.unwrap();
+        assert!(command.contains("SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(!command.contains("12345"));
     }
 }
