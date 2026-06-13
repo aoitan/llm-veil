@@ -9,8 +9,8 @@ impl Redactor {
     pub fn new() -> Self {
         let rules = vec![
             (
-                Regex::new(r#"(?i)(password|secret|token|api_key)(\s*[:=]\s*)([^\s'"\r\n]+)"#).unwrap(),
-                "${1}${2}[REDACTED_SECRET]".to_string()
+                Regex::new(r#"(?i)(^|[^A-Za-z0-9_]|\\[rn])(password|secret(?:_key)?|token|api[_-]?key)(\s*[:=]\s*)(["']?)([^\s'"\r\n;\\]+)(["']?)"#).unwrap(),
+                "${1}${2}${3}${4}[REDACTED_SECRET]${6}".to_string()
             ),
             (
                 Regex::new(r#"(?i)(authorization\s*:\s*bearer\s+)([^\s'"\r\n]+)"#).unwrap(),
@@ -33,10 +33,14 @@ impl Redactor {
                 Regex::new(r#"(?i)(-----BEGIN [A-Z0-9_ ]+PRIVATE KEY-----)"#).unwrap(),
                 "[REDACTED_SECRET]".to_string()
             ),
+            (
+                Regex::new(r"/(Users|home)/[a-zA-Z0-9_-]+").unwrap(),
+                "[REDACTED_PATH]".to_string()
+            ),
         ];
 
         let detect_patterns = vec![
-            r#"(?i)(password|secret|token|api_key)\s*[:=]"#,
+            r#"(?i)(^|[^A-Za-z0-9_]|\\[rn])(password|secret(?:_key)?|token|api[_-]?key)\s*[:=]"#,
             r#"(?i)authorization\s*:\s*bearer"#,
             r#"(?i)(postgres|mysql|mongodb|redis|sqlite|mssql|sftp|http|https)://[^:\s]+:[^@\s]+@"#,
             r#"(?i)AKIA[A-Z0-9]{16}"#,
@@ -61,6 +65,15 @@ impl Redactor {
         }
         result
     }
+
+    pub fn count_redactions(before: &str, after: &str) -> usize {
+        let count_markers = |s: &str| {
+            s.matches("[REDACTED_SECRET]").count() + s.matches("[REDACTED_PATH]").count()
+        };
+        let before_redacts = count_markers(before);
+        let after_redacts = count_markers(after);
+        after_redacts.saturating_sub(before_redacts)
+    }
 }
 
 #[cfg(test)]
@@ -74,10 +87,11 @@ mod tests {
         // シークレットが含まれる場合は true
         assert!(redactor.has_secret("password=super_secret_123"));
         assert!(redactor.has_secret("api_key: \"AIzaSy...\""));
+        assert!(redactor.has_secret("SECRET_KEY=12345"));
         assert!(redactor.has_secret("Authorization: Bearer my_jwt_token"));
         assert!(redactor.has_secret("postgres://user:pass@localhost:5432/db"));
         assert!(redactor.has_secret("-----BEGIN RSA PRIVATE KEY-----"));
-        
+
         // 含まれない場合は false
         assert!(!redactor.has_secret("hello world"));
     }
@@ -86,11 +100,47 @@ mod tests {
     fn test_redactor_redact() {
         let redactor = Redactor::new();
 
-        let input = "my password=12345 and token=abcde and db=postgres://user:pass@localhost:5432/db";
+        let input =
+            "my password=12345 and token=abcde and db=postgres://user:pass@localhost:5432/db";
         let output = redactor.redact(input);
         assert!(output.contains("[REDACTED_SECRET]"));
         assert!(!output.contains("12345"));
         assert!(!output.contains("abcde"));
         assert!(!output.contains("user:pass@"));
+
+        let quoted = redactor.redact("const token = \"my_jwt_token\";");
+        assert_eq!(quoted, "const token = \"[REDACTED_SECRET]\";");
+
+        let secret_key = redactor.redact("SECRET_KEY=12345");
+        assert_eq!(secret_key, "SECRET_KEY=[REDACTED_SECRET]");
+
+        let escaped_newline = redactor.redact(r#"printf 'Hello\nSECRET_KEY=12345\n'"#);
+        assert!(escaped_newline.contains(r#"SECRET_KEY=[REDACTED_SECRET]"#));
+        assert!(!escaped_newline.contains("12345"));
+    }
+
+    #[test]
+    fn test_count_redactions_counts_new_markers_only() {
+        assert_eq!(
+            Redactor::count_redactions("token=abc", "token=[REDACTED_SECRET]"),
+            1
+        );
+        assert_eq!(
+            Redactor::count_redactions("/Users/user", "[REDACTED_PATH]"),
+            1
+        );
+        assert_eq!(
+            Redactor::count_redactions("already [REDACTED_SECRET] and [REDACTED_PATH]", "already [REDACTED_SECRET] and [REDACTED_PATH]"),
+            0
+        );
+    }
+
+    #[test]
+    fn test_redactor_redacts_absolute_path() {
+        let redactor = Redactor::new();
+        let input = "/Users/aoitan/workspace/token_filter/tomoe_works/test_data/grep/auth.ts:2:const token = \"my_jwt_token\";";
+        let output = redactor.redact(input);
+        assert!(output.contains("[REDACTED_PATH]"));
+        assert!(!output.contains("aoitan"));
     }
 }
