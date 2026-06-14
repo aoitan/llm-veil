@@ -15,13 +15,14 @@ pub struct PathGuard {
 }
 
 impl PathGuard {
-    pub fn new(blocked_patterns: Vec<String>, action: PathAction) -> Self {
-        let patterns = blocked_patterns
-            .into_iter()
-            .filter_map(|pat| Pattern::new(&pat).ok().map(|pattern| (pat, pattern)))
-            .collect();
+    pub fn new(blocked_patterns: Vec<String>, action: PathAction) -> Result<Self, glob::PatternError> {
+        let mut patterns = Vec::with_capacity(blocked_patterns.len());
+        for pat in blocked_patterns {
+            let pattern = Pattern::new(&pat)?;
+            patterns.push((pat, pattern));
+        }
 
-        Self { patterns, action }
+        Ok(Self { patterns, action })
     }
 
     fn matching_rule(&self, path: &str) -> Option<&str> {
@@ -97,7 +98,7 @@ mod tests {
         let guard = PathGuard::new(
             vec![".env".to_string(), "*.key".to_string()],
             PathAction::Block,
-        );
+        ).unwrap();
 
         // Blockアクションの場合、危険パスはブロックされるべき
         assert!(guard.should_block(".env"));
@@ -116,7 +117,7 @@ mod tests {
         let guard = PathGuard::new(
             vec![".env".to_string(), "*.key".to_string()],
             PathAction::Redact,
-        );
+        ).unwrap();
 
         // Redactアクションの場合、ブロックはせず、サニタイズ対象とする
         assert!(!guard.should_block(".env"));
@@ -130,10 +131,17 @@ mod tests {
         let guard = PathGuard::new(
             vec![".env".to_string(), "*.key".to_string()],
             PathAction::Allow,
-        );
+        ).unwrap();
 
         // Allowアクションの場合、何もしない
         assert!(!guard.should_block(".env"));
         assert!(!guard.should_redact(".env"));
+    }
+
+    #[test]
+    fn test_path_guard_invalid_pattern() {
+        // 無効なパターン（例: 開き角括弧 "[" のみ）を渡した場合、Err を返すことを期待する
+        let res = PathGuard::new(vec!["[".to_string()], PathAction::Block);
+        assert!(res.is_err(), "Expected error for invalid pattern '[', but got Ok");
     }
 }

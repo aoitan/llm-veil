@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn test_execute_simple_command() {
-        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
 
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn test_execute_timeout() {
-        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
 
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn test_execute_blocked_path() {
-        let path_guard = PathGuard::new(vec![".env".to_string()], PathAction::Block);
+        let path_guard = PathGuard::new(vec![".env".to_string()], PathAction::Block).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
 
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn test_execute_redacts_secret_in_command_metadata() {
-        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
 
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_execute_truncates_stdout_and_stderr_with_configured_limit() {
-        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
 

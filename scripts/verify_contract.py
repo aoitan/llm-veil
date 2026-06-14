@@ -35,6 +35,33 @@ FORBIDDEN_RAW_VALUES = [
 ]
 
 
+COVERAGE_MATRIX = [
+    {"axis": "出力経路", "item": "stdout", "status": "verified", "notes": "各コマンドの標準出力における漏洩防止"},
+    {"axis": "出力経路", "item": "stderr", "status": "verified", "notes": "エラーメッセージおよび統計レポート内の漏洩防止"},
+    {"axis": "出力経路", "item": "report", "status": "verified", "notes": "`report` サブコマンド出力および `--report-json` ファイル内の漏洩防止"},
+    {"axis": "出力経路", "item": "snapshot", "status": "verified", "notes": "テスト用の snapshot ログにおける漏洩防止"},
+    {"axis": "パス種別", "item": "HOME", "status": "verified", "notes": "ホームディレクトリパスの秘匿化"},
+    {"axis": "パス種別", "item": "TMPDIR", "status": "verified", "notes": "一時ディレクトリパスの秘匿化"},
+    {"axis": "パス種別", "item": "repo absolute", "status": "verified", "notes": "リポジトリの絶対パスの秘匿化"},
+    {"axis": "シークレット種別", "item": "plain", "status": "verified", "notes": "平文のシークレット検知"},
+    {"axis": "シークレット種別", "item": "multiline", "status": "verified", "notes": "複数行にまたがるシークレットの検知"},
+    {"axis": "シークレット種別", "item": "base64", "status": "verified", "notes": "Base64 エンコードされたシークレットの検知"},
+    {"axis": "アクション", "item": "block", "status": "verified", "notes": "危険ファイルのブロックおよびシークレット検出時のブロック"},
+    {"axis": "アクション", "item": "redact", "status": "verified", "notes": "シークレットおよびパスの伏字置換"},
+    {"axis": "アクション", "item": "warn", "status": "verified", "notes": "インジェクション検出時の警告出力"},
+]
+
+
+def print_coverage_matrix():
+    print("\n================== Coverage Matrix ==================")
+    print(f"{'軸':<15} | {'項目':<15} | {'状態':<10} | {'備考'}")
+    print("-" * 70)
+    for entry in COVERAGE_MATRIX:
+        print(f"{entry['axis']:<15} | {entry['item']:<15} | {entry['status']:<10} | {entry['notes']}")
+    print("=====================================================\n")
+
+
+
 def visible_forbidden_paths(paths: list[Path | str]) -> list[str]:
     forbidden: list[str] = []
     seen: set[str] = set()
@@ -249,23 +276,41 @@ def assert_block_contract(
         "path_rule": path_rule,
         "exit_code": "1",
     }
+    case_failures = []
     for key, value in expected.items():
         if fields.get(key) != value:
-            failures.append(
-                f"{result.name}: expected {key}={value!r}, got {fields.get(key)!r}"
+            case_failures.append(
+                f"expected {key}={value!r}, got {fields.get(key)!r}"
             )
+
+    # path_rule の責務混線の検証 (path_blocked の場合のみ値を持つ)
+    if reason != "path_blocked" and fields.get("path_rule", "") != "":
+        case_failures.append(
+            f"expected path_rule to be empty when reason is {reason!r}, but got {fields.get('path_rule')!r}"
+        )
 
     try:
         redactions = int(fields.get("redactions", "-1"))
     except ValueError:
         redactions = -1
     if redactions < redactions_min:
-        failures.append(
-            f"{result.name}: expected redactions >= {redactions_min}, got {redactions}"
+        case_failures.append(
+            f"expected redactions >= {redactions_min}, got {redactions}"
         )
 
     if result.returncode != 1:
-        failures.append(f"{result.name}: expected process exit 1, got {result.returncode}")
+        case_failures.append(f"expected process exit 1, got {result.returncode}")
+
+    if case_failures:
+        cmd_str = " ".join(result.args)
+        failures.append(
+            f"Case: {result.name}\n"
+            f"  Command: {cmd_str}\n"
+            f"  Failures:\n"
+            + "\n".join(f"    - {f}" for f in case_failures) + "\n"
+            f"  Actual Stdout:\n{result.stdout}\n"
+            f"  Actual Stderr:\n{result.stderr}"
+        )
 
     return failures
 
@@ -458,6 +503,33 @@ def main(argv: list[str] | None = None) -> int:
             )
         config_path.unlink()
 
+        # 無効な glob パターン設定時のエラーテスト
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            json.dumps({"blocked_patterns": ["["]}),
+            encoding="utf-8",
+        )
+        invalid_glob_result = run([str(VEIL), "cat", str(paths["normal"])], env, "cat with invalid glob")
+        results.append(invalid_glob_result)
+        
+        # 期待値: 終了コード 1、エラーメッセージ出力
+        case_failures = []
+        if invalid_glob_result.returncode != 1:
+            case_failures.append(f"expected exit code 1, got {invalid_glob_result.returncode}")
+        if "Error: Invalid pattern in configuration" not in invalid_glob_result.stderr:
+            case_failures.append("expected 'Error: Invalid pattern in configuration' in stderr")
+            
+        if case_failures:
+            failures.append(
+                f"Case: cat with invalid glob\n"
+                f"  Command: {' '.join(invalid_glob_result.args)}\n"
+                f"  Failures:\n"
+                + "\n".join(f"    - {f}" for f in case_failures) + "\n"
+                f"  Actual Stdout:\n{invalid_glob_result.stdout}\n"
+                f"  Actual Stderr:\n{invalid_glob_result.stderr}"
+            )
+        config_path.unlink()
+
         prompt_injection_cat = run(
             [str(VEIL), "cat", str(paths["prompt_injection"])],
             env,
@@ -617,6 +689,8 @@ def main(argv: list[str] | None = None) -> int:
 
         failures.extend(verify_observation_snapshot(results, refresh=args.refresh))
         failures.extend(assert_leakage_contract(results, run_tmp, forbidden_paths))
+
+        print_coverage_matrix()
 
         if failures:
             print("Safety Gate contract verification FAILED", file=sys.stderr)

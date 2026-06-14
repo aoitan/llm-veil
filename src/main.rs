@@ -78,7 +78,13 @@ fn main() {
         config.max_chars = max_chars;
     }
 
-    let path_guard = PathGuard::new(config.blocked_patterns.clone(), config.action);
+    let path_guard = match PathGuard::new(config.blocked_patterns.clone(), config.action) {
+        Ok(pg) => pg,
+        Err(e) => {
+            eprintln!("Error: Invalid pattern in configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
     let redactor = Redactor::new();
     let injector = Injector::new();
 
@@ -608,7 +614,7 @@ mod tests {
         let mut file = fs::File::create(&file_path).unwrap();
         writeln!(file, "const token = \"my_jwt_token\";").unwrap();
 
-        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let mut results = Vec::new();
         let mut redactions = 0;
@@ -636,7 +642,7 @@ mod tests {
         let mut file = fs::File::create(&file_path).unwrap();
         writeln!(file, "export API_KEY=AIzaSyAThisIsAFakeApiKeyForTesting").unwrap();
 
-        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
         let config = config::Config {
