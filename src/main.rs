@@ -625,7 +625,7 @@ fn format_stats_for_stderr(stats: &Stats, redactor: &Redactor) -> String {
     output.push_str(&format!("truncated: {}\n", stats.truncated));
     output.push_str(&format!("timeout: {}\n", stats.timeout));
 
-    output
+    final_output_filter(&output, redactor).content
 }
 
 #[cfg(test)]
@@ -715,6 +715,29 @@ mod tests {
         let output = format_stats_for_stderr(&stats, &redactor);
 
         assert!(output.contains("SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(!output.contains("12345"));
+    }
+
+    #[test]
+    fn test_stats_stderr_formatter_applies_final_redactor_to_whole_output() {
+        let redactor = Redactor::new();
+        let stats = Stats {
+            run_id: "SECRET_KEY=12345".to_string(),
+            command: Some("safe command".to_string()),
+            exit_code: Some(0),
+            raw_bytes: 16,
+            returned_bytes: 16,
+            reduction: 0.0,
+            redactions: 0,
+            prompt_injection_warnings: 0,
+            truncated: false,
+            timeout: false,
+            timestamp: Utc::now().to_rfc3339(),
+        };
+
+        let output = format_stats_for_stderr(&stats, &redactor);
+
+        assert!(output.contains("run_id: SECRET_KEY=[REDACTED_SECRET]"));
         assert!(!output.contains("12345"));
     }
 

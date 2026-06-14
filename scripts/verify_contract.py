@@ -19,6 +19,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 VEIL = REPO_ROOT / "target" / "debug" / "veil"
 DEFAULT_SNAPSHOT = REPO_ROOT / "tests" / "fixtures" / "contract_observations.json"
 COVERAGE_MATRIX_PATH = REPO_ROOT / "doc" / "contract_coverage_matrix.json"
+CONTRACT_WORKSPACE_PARENT = REPO_ROOT / ".contract-workspaces"
 
 FORBIDDEN_RAW_VALUES = [
     "super_secret_pass",
@@ -59,7 +60,12 @@ class CommandResult:
 
 
 def run(args: list[str], env: dict[str, str], name: str) -> CommandResult:
-    cwd = Path(env.get("LLM_VEIL_WORKSPACE_ROOT", REPO_ROOT))
+    cwd = Path(
+        env.get(
+            "LLM_VEIL_CONTRACT_CWD",
+            env.get("LLM_VEIL_WORKSPACE_ROOT", str(REPO_ROOT)),
+        )
+    )
     proc = subprocess.run(
         args,
         cwd=cwd,
@@ -490,7 +496,10 @@ def main(argv: list[str] | None = None) -> int:
     if build.returncode != 0:
         return build.returncode
 
-    tmp_root = Path(tempfile.mkdtemp(prefix="llm-veil-contract-"))
+    CONTRACT_WORKSPACE_PARENT.mkdir(exist_ok=True)
+    tmp_root = Path(
+        tempfile.mkdtemp(prefix="llm-veil-contract-", dir=CONTRACT_WORKSPACE_PARENT)
+    )
     outside_root = Path(tempfile.mkdtemp(prefix="llm-veil-outside-workspace-"))
     try:
         paths = write_fixture(tmp_root)
@@ -508,7 +517,8 @@ def main(argv: list[str] | None = None) -> int:
         env["TEMP"] = str(temp)
         env["TMP"] = str(temp)
         env["TOKEN"] = "env_token_13579"
-        env["LLM_VEIL_WORKSPACE_ROOT"] = str(tmp_root)
+        env["LLM_VEIL_WORKSPACE_ROOT"] = str(REPO_ROOT)
+        env["LLM_VEIL_CONTRACT_CWD"] = str(tmp_root)
         config_dir = home / ".config" / "llm-veil"
         config_path = config_dir / "config.json"
 
@@ -933,6 +943,10 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
         shutil.rmtree(outside_root, ignore_errors=True)
+        try:
+            CONTRACT_WORKSPACE_PARENT.rmdir()
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
