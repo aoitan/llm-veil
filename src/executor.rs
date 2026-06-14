@@ -4,6 +4,7 @@ use crate::redactor::Redactor;
 use crate::stats::Stats;
 use crate::truncator::truncate;
 use chrono::Utc;
+use std::ffi::OsString;
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -46,17 +47,17 @@ pub fn execute_command(
     cmd.args(&command_args[1..]);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    let (sanitized_env, env_redactions) = sanitized_environment(redactor);
+    cmd.envs(sanitized_env);
 
     let mut child = cmd.spawn()?;
 
     let mut timeout = false;
-    let mut exit_code = None;
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
 
-    match child.wait_timeout(timeout_duration)? {
+    let exit_code = match child.wait_timeout(timeout_duration)? {
         Some(status) => {
-            exit_code = status.code();
             // 出力の読み出し
             if let Some(mut stdout) = child.stdout.take() {
                 stdout.read_to_end(&mut stdout_bytes)?;
@@ -64,13 +65,15 @@ pub fn execute_command(
             if let Some(mut stderr) = child.stderr.take() {
                 stderr.read_to_end(&mut stderr_bytes)?;
             }
+            status.code()
         }
         None => {
             timeout = true;
             child.kill()?;
             let _ = child.wait(); // ゾンビプロセス化を防ぐ
+            Some(124)
         }
-    }
+    };
 
     let raw_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     let raw_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
@@ -80,7 +83,8 @@ pub fn execute_command(
     let redacted_stderr = redactor.redact(&raw_stderr);
 
     let redactions = Redactor::count_redactions(&raw_stdout, &redacted_stdout)
-        + Redactor::count_redactions(&raw_stderr, &redacted_stderr);
+        + Redactor::count_redactions(&raw_stderr, &redacted_stderr)
+        + env_redactions;
 
     // インジェクションの検出
     let prompt_injection_warnings =
@@ -121,6 +125,43 @@ pub fn execute_command(
         stderr: final_stderr,
         stats,
     })
+}
+
+fn sanitized_environment(redactor: &Redactor) -> (Vec<(OsString, OsString)>, usize) {
+    let mut redactions = 0;
+    let env = std::env::vars_os()
+        .map(|(key, value)| {
+            if let (Some(key_str), Some(value_str)) = (key.to_str(), value.to_str()) {
+                let (sanitized_value, value_redactions) =
+                    sanitized_env_value(key_str, value_str, redactor);
+                if value_redactions > 0 {
+                    redactions += value_redactions;
+                    return (key, OsString::from(sanitized_value));
+                }
+            }
+
+            (key, value)
+        })
+        .collect();
+
+    (env, redactions)
+}
+
+fn sanitized_env_value(key: &str, value: &str, redactor: &Redactor) -> (String, usize) {
+    let pair = format!("{key}={value}");
+    if !redactor.has_secret(&pair) {
+        return (value.to_string(), 0);
+    }
+
+    let redacted_pair = redactor.redact(&pair);
+    let redactions = Redactor::count_redactions(&pair, &redacted_pair);
+    let prefix = format!("{key}=");
+    let sanitized_value = redacted_pair
+        .strip_prefix(&prefix)
+        .unwrap_or(value)
+        .to_string();
+
+    (sanitized_value, redactions)
 }
 
 #[cfg(test)]
@@ -172,6 +213,7 @@ mod tests {
         assert!(result.is_ok());
         let res = result.unwrap();
         assert!(res.stats.timeout);
+        assert_eq!(res.stats.exit_code, Some(124));
     }
 
     #[test]
@@ -224,6 +266,16 @@ mod tests {
         let command = res.stats.command.unwrap();
         assert!(command.contains("SECRET_KEY=[REDACTED_SECRET]"));
         assert!(!command.contains("12345"));
+    }
+
+    #[test]
+    fn test_sanitized_env_value_uses_existing_secret_redactor() {
+        let redactor = Redactor::new();
+
+        let (value, redactions) = sanitized_env_value("TOKEN", "env_token_13579", &redactor);
+
+        assert_eq!(value, "[REDACTED_SECRET]");
+        assert_eq!(redactions, 1);
     }
 
     #[test]

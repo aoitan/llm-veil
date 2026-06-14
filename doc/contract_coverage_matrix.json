@@ -1,0 +1,290 @@
+{
+  "schema_version": 1,
+  "status_definitions": {
+    "verified": "Automated contract verification observes this case.",
+    "untested": "The case is contract-relevant but is not yet covered by automated verification.",
+    "out_of_scope": "The case is explicitly outside the current contract."
+  },
+  "cases": [
+    {
+      "case": "cat .env",
+      "trigger": "path",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Default dangerous-file pattern blocks .env."
+    },
+    {
+      "case": "cat *.pem",
+      "trigger": "path",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Default dangerous-file pattern blocks private key material."
+    },
+    {
+      "case": "cat *.key",
+      "trigger": "path",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Filename glob matching is observed for key files."
+    },
+    {
+      "case": "cat .ssh/",
+      "trigger": "path",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Directory component matching is observed for .ssh."
+    },
+    {
+      "case": "cat .aws/",
+      "trigger": "path",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Directory component matching is observed for .aws."
+    },
+    {
+      "case": "cat composite blocked path",
+      "trigger": "compound",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Path blocking takes priority over secret and prompt-injection content."
+    },
+    {
+      "case": "cat secret",
+      "trigger": "content",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Plain secret content is blocked and reported."
+    },
+    {
+      "case": "cat base64 secret",
+      "trigger": "content",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Base64 secret content is blocked and reported."
+    },
+    {
+      "case": "cat multiline secret",
+      "trigger": "content",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Multiline secret content is blocked and reported."
+    },
+    {
+      "case": "cat normal",
+      "trigger": "normal",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Normal file content remains allowed."
+    },
+    {
+      "case": "cat prompt injection warn",
+      "trigger": "warning",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Warn mode records prompt-injection warnings without blocking."
+    },
+    {
+      "case": "cat with invalid glob",
+      "trigger": "configuration",
+      "command": "cat",
+      "observability": ["stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Invalid glob configuration fails closed."
+    },
+    {
+      "case": "cat prompt injection",
+      "trigger": "content",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Block mode rejects prompt-injection content."
+    },
+    {
+      "case": "cat large",
+      "trigger": "size",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Large output is truncated and reported."
+    },
+    {
+      "case": "grep token",
+      "trigger": "content",
+      "command": "grep",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "grep output redacts bearer-token-like content."
+    },
+    {
+      "case": "grep postgres",
+      "trigger": "content",
+      "command": "grep",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "grep output redacts credential-bearing URLs."
+    },
+    {
+      "case": "run secret",
+      "trigger": "content",
+      "command": "run",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "run redacts stdout and stderr secrets and writes report JSON."
+    },
+    {
+      "case": "run stderr-only secret",
+      "trigger": "content",
+      "command": "run",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "run counts redactions when the secret appears only on stderr."
+    },
+    {
+      "case": "run env secret",
+      "trigger": "environment",
+      "command": "run",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Environment-derived secrets are sanitized before the child observes them."
+    },
+    {
+      "case": "run timeout",
+      "trigger": "execution",
+      "command": "run",
+      "observability": ["stderr", "report", "snapshot"],
+      "expected_exit_code": 124,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Timeout returns and reports exit code 124."
+    },
+    {
+      "case": "report",
+      "trigger": "reporting",
+      "command": "report",
+      "observability": ["stdout", "snapshot"],
+      "expected_exit_code": 0,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Latest execution report is printable and sanitized."
+    },
+    {
+      "case": "cat symlink to blocked file",
+      "trigger": "path-canonicalization",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "untested",
+      "notes": "Red-team gap: string matching does not prove protection for symlinks."
+    },
+    {
+      "case": "cat path traversal to blocked file",
+      "trigger": "path-canonicalization",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "untested",
+      "notes": "Red-team gap: foo/../.env and repeated ./ normalization are not specified."
+    },
+    {
+      "case": "cat absolute path outside workspace",
+      "trigger": "workspace-boundary",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "untested",
+      "notes": "Red-team gap: workspace boundary and canonical path policy are not specified."
+    },
+    {
+      "case": "cat windows-style blocked path",
+      "trigger": "path-normalization",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "untested",
+      "notes": "Red-team gap: backslash path handling is not specified."
+    },
+    {
+      "case": "cat .git/config",
+      "trigger": "path",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "untested",
+      "notes": "Red-team gap: default .git directory protection should be observable."
+    },
+    {
+      "case": "cat .env.local",
+      "trigger": "path",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "untested",
+      "notes": "Red-team gap: near-name secret files need an explicit policy decision."
+    },
+    {
+      "case": "mixed block and redact policy",
+      "trigger": "policy",
+      "command": "cat",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": null,
+      "priority": "candidate",
+      "status": "untested",
+      "notes": "Red-team gap: per-pattern action is not supported by the current policy model."
+    }
+  ]
+}

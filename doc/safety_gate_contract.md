@@ -59,25 +59,18 @@ timeout: <true_or_false>
 
 ### 4.1 検証ステータス定義
 - **`verified`**: 実測可能なテスト（fixture等）が存在し、漏洩がないことが確認されている状態。
+- **`untested`**: 契約上重要だが、まだ自動検証ケースとして固定されていない状態。
 - **`limited`**: 検知パターンは存在するが、一部の条件（巨大ファイルやエスケープされた入力等）において未検証、または制限がある状態。
 - **`out_of_scope`**: 設計上、本安全ゲートの検知・保護対象外とする状態。
 
 ### 4.2 Coverage Matrix
-安全ゲートが現在サポートする網羅性マトリクスは以下の通りです。
+安全ゲートの網羅性マトリクスは `doc/contract_coverage_matrix.json` で管理します。
+`scripts/verify_contract.py` は以下を検証します。
 
-| 軸 | 項目 | 状態 | 備考 |
-|---|---|---|---|
-| **出力経路** | stdout | `verified` | 各コマンドの標準出力における漏洩防止 |
-| | stderr | `verified` | エラーメッセージおよび統計レポート内の漏洩防止 |
-| | report | `verified` | `report` サブコマンド出力および `--report-json` ファイル内の漏洩防止 |
-| | snapshot | `verified` | テスト用の snapshot ログにおける漏洩防止 |
-| **パス種別** | HOME | `verified` | ホームディレクトリパスの秘匿化 |
-| | TMPDIR | `verified` | 一時ディレクトリパスの秘匿化 |
-| | repo absolute | `verified` | リポジトリの絶対パスの秘匿化 |
-| **シークレット種別** | plain | `verified` | 平文のシークレット検知 |
-| | multiline | `verified` | 複数行にまたがるシークレットの検知 |
-| | base64 | `verified` | Base64 エンコードされたシークレットの検知 |
-| **アクション** | block | `verified` | 危険ファイルのブロックおよびシークレット検出時のブロック |
-| | redact | `verified` | シークレットおよびパスの伏字置換 |
-| | warn | `verified` | インジェクション検出時の警告出力 |
+- 実測されたケースがすべて coverage matrix に存在すること。
+- `verified` とされたケースが実測結果に存在すること。
+- matrix 上の `expected_exit_code` と実測終了コードが一致すること。
+- `required` かつ `untested` のケースを `Coverage completeness: PARTIAL` として出力に残すこと。
 
+通常の契約検証は、既存の contract assertions が満たされれば成功します。
+未検証ケースも失敗にしたい場合は `scripts/verify_contract.py --strict-coverage` を使用します。

@@ -1,0 +1,172 @@
+{
+  "contract_observations": [
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat .env",
+      "path_rule": ".env",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat *.pem",
+      "path_rule": "*.pem",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat *.key",
+      "path_rule": "*.key",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat .ssh/",
+      "path_rule": ".ssh/",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat .aws/",
+      "path_rule": ".aws/",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat composite blocked path",
+      "path_rule": ".ssh/",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat secret",
+      "path_rule": "",
+      "reason": "secret_detected",
+      "redactions": 3
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat base64 secret",
+      "path_rule": "",
+      "reason": "secret_detected",
+      "redactions": 1
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat multiline secret",
+      "path_rule": "",
+      "reason": "secret_detected",
+      "redactions": 1
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "cat normal",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "cat prompt injection warn",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 1,
+      "name": "cat with invalid glob",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat prompt injection",
+      "path_rule": "",
+      "reason": "prompt_injection_detected",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "cat large",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "grep token",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "grep postgres",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "run secret",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "run stderr-only secret",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "run env secret",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 124,
+      "name": "run timeout",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 0,
+      "name": "report",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 1
+    }
+  ]
+}
