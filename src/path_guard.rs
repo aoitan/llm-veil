@@ -1,5 +1,5 @@
-use serde::{Serialize, Deserialize};
 use glob::Pattern;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,7 +10,7 @@ pub enum PathAction {
 }
 
 pub struct PathGuard {
-    patterns: Vec<Pattern>,
+    patterns: Vec<(String, Pattern)>,
     action: PathAction,
 }
 
@@ -18,18 +18,18 @@ impl PathGuard {
     pub fn new(blocked_patterns: Vec<String>, action: PathAction) -> Self {
         let patterns = blocked_patterns
             .into_iter()
-            .filter_map(|pat| Pattern::new(&pat).ok())
+            .filter_map(|pat| Pattern::new(&pat).ok().map(|pattern| (pat, pattern)))
             .collect();
 
         Self { patterns, action }
     }
 
-    fn matches_any(&self, path: &str) -> bool {
+    fn matching_rule(&self, path: &str) -> Option<&str> {
         let path_obj = Path::new(path);
 
         // 1. パス全体に対する glob マッチ
-        if self.patterns.iter().any(|pat| pat.matches(path)) {
-            return true;
+        if let Some((rule, _)) = self.patterns.iter().find(|(_, pat)| pat.matches(path)) {
+            return Some(rule);
         }
 
         // 先頭の "./" を取り除いた相対パスでチェック
@@ -38,42 +38,50 @@ impl PathGuard {
         } else {
             path
         };
-        if self.patterns.iter().any(|pat| pat.matches(normalized)) {
-            return true;
+        if let Some((rule, _)) = self
+            .patterns
+            .iter()
+            .find(|(_, pat)| pat.matches(normalized))
+        {
+            return Some(rule);
         }
 
         // 2. ファイル名に対するマッチ (例: "id_rsa.key" が "*.key" にマッチ)
         if let Some(file_name) = path_obj.file_name().and_then(|f| f.to_str()) {
-            if self.patterns.iter().any(|pat| pat.matches(file_name)) {
-                return true;
+            if let Some((rule, _)) = self.patterns.iter().find(|(_, pat)| pat.matches(file_name)) {
+                return Some(rule);
             }
         }
 
         // 3. 各パスコンポーネント（中間ディレクトリ）に対するマッチ (例: ".git/config" の ".git")
         for comp in path_obj.components() {
             if let Some(comp_str) = comp.as_os_str().to_str() {
-                if self.patterns.iter().any(|pat| {
+                if let Some((rule, _)) = self.patterns.iter().find(|(_, pat)| {
                     pat.matches(comp_str) || pat.matches(&format!("{}/", comp_str))
                 }) {
-                    return true;
+                    return Some(rule);
                 }
             }
         }
 
-        false
+        None
     }
 
     pub fn should_block(&self, path: &str) -> bool {
+        self.block_rule(path).is_some()
+    }
+
+    pub fn block_rule(&self, path: &str) -> Option<&str> {
         if self.action == PathAction::Block {
-            self.matches_any(path)
+            self.matching_rule(path)
         } else {
-            false
+            None
         }
     }
 
     pub fn should_redact(&self, path: &str) -> bool {
         if self.action == PathAction::Redact {
-            self.matches_any(path)
+            self.matching_rule(path).is_some()
         } else {
             false
         }
@@ -97,7 +105,8 @@ mod tests {
         assert!(guard.should_block("src/.env"));
         assert!(guard.should_block("config.key"));
         assert!(guard.should_block("./config.key"));
-        
+        assert_eq!(guard.block_rule("./config.key"), Some("*.key"));
+
         // 危険パスでないものはブロックされない
         assert!(!guard.should_block("main.rs"));
     }
