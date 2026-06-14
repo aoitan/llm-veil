@@ -15,7 +15,10 @@ pub struct PathGuard {
 }
 
 impl PathGuard {
-    pub fn new(blocked_patterns: Vec<String>, action: PathAction) -> Result<Self, glob::PatternError> {
+    pub fn new(
+        blocked_patterns: Vec<String>,
+        action: PathAction,
+    ) -> Result<Self, glob::PatternError> {
         let mut patterns = Vec::with_capacity(blocked_patterns.len());
         for pat in blocked_patterns {
             let pattern = Pattern::new(&pat)?;
@@ -26,18 +29,29 @@ impl PathGuard {
     }
 
     fn matching_rule_for_text(&self, path: &str) -> Option<&str> {
-        let path_obj = Path::new(path);
+        let slash_normalized;
+        let path_for_matching = if path.contains('\\') {
+            slash_normalized = path.replace('\\', "/");
+            slash_normalized.as_str()
+        } else {
+            path
+        };
+        let path_obj = Path::new(path_for_matching);
 
         // 1. パス全体に対する glob マッチ
-        if let Some((rule, _)) = self.patterns.iter().find(|(_, pat)| pat.matches(path)) {
+        if let Some((rule, _)) = self
+            .patterns
+            .iter()
+            .find(|(_, pat)| pat.matches(path_for_matching))
+        {
             return Some(rule);
         }
 
         // 先頭の "./" を取り除いた相対パスでチェック
-        let normalized = if path.starts_with("./") {
-            &path[2..]
+        let normalized = if path_for_matching.starts_with("./") {
+            &path_for_matching[2..]
         } else {
-            path
+            path_for_matching
         };
         if let Some((rule, _)) = self
             .patterns
@@ -73,13 +87,11 @@ impl PathGuard {
             return Some(rule);
         }
 
-        fs::canonicalize(path)
-            .ok()
-            .and_then(|canonical| {
-                canonical
-                    .to_str()
-                    .and_then(|canonical_path| self.matching_rule_for_text(canonical_path))
-            })
+        fs::canonicalize(path).ok().and_then(|canonical| {
+            canonical
+                .to_str()
+                .and_then(|canonical_path| self.matching_rule_for_text(canonical_path))
+        })
     }
 
     pub fn should_block(&self, path: &str) -> bool {
@@ -110,9 +122,10 @@ mod tests {
     #[test]
     fn test_path_guard_block() {
         let guard = PathGuard::new(
-            vec![".env".to_string(), "*.key".to_string()],
+            vec![".env".to_string(), "*.key".to_string(), ".ssh/".to_string()],
             PathAction::Block,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Blockアクションの場合、危険パスはブロックされるべき
         assert!(guard.should_block(".env"));
@@ -121,6 +134,7 @@ mod tests {
         assert!(guard.should_block("config.key"));
         assert!(guard.should_block("./config.key"));
         assert_eq!(guard.block_rule("./config.key"), Some("*.key"));
+        assert_eq!(guard.block_rule(r"src\.ssh\id_rsa"), Some(".ssh/"));
 
         // 危険パスでないものはブロックされない
         assert!(!guard.should_block("main.rs"));
@@ -131,7 +145,8 @@ mod tests {
         let guard = PathGuard::new(
             vec![".env".to_string(), "*.key".to_string()],
             PathAction::Redact,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Redactアクションの場合、ブロックはせず、サニタイズ対象とする
         assert!(!guard.should_block(".env"));
@@ -145,7 +160,8 @@ mod tests {
         let guard = PathGuard::new(
             vec![".env".to_string(), "*.key".to_string()],
             PathAction::Allow,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Allowアクションの場合、何もしない
         assert!(!guard.should_block(".env"));
@@ -156,7 +172,10 @@ mod tests {
     fn test_path_guard_invalid_pattern() {
         // 無効なパターン（例: 開き角括弧 "[" のみ）を渡した場合、Err を返すことを期待する
         let res = PathGuard::new(vec!["[".to_string()], PathAction::Block);
-        assert!(res.is_err(), "Expected error for invalid pattern '[', but got Ok");
+        assert!(
+            res.is_err(),
+            "Expected error for invalid pattern '[', but got Ok"
+        );
     }
 
     #[cfg(unix)]
@@ -164,10 +183,7 @@ mod tests {
     fn test_path_guard_block_canonical_symlink_target() -> std::io::Result<()> {
         use std::os::unix::fs::symlink;
 
-        let root = std::env::temp_dir().join(format!(
-            "llm-veil-path-guard-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("llm-veil-path-guard-{}", std::process::id()));
         let ssh_dir = root.join(".ssh");
         std::fs::create_dir_all(&ssh_dir)?;
         let secret_file = ssh_dir.join("id_rsa");
