@@ -1,6 +1,6 @@
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{fs, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PathAction {
@@ -25,7 +25,7 @@ impl PathGuard {
         Ok(Self { patterns, action })
     }
 
-    fn matching_rule(&self, path: &str) -> Option<&str> {
+    fn matching_rule_for_text(&self, path: &str) -> Option<&str> {
         let path_obj = Path::new(path);
 
         // 1. パス全体に対する glob マッチ
@@ -66,6 +66,20 @@ impl PathGuard {
         }
 
         None
+    }
+
+    fn matching_rule(&self, path: &str) -> Option<&str> {
+        if let Some(rule) = self.matching_rule_for_text(path) {
+            return Some(rule);
+        }
+
+        fs::canonicalize(path)
+            .ok()
+            .and_then(|canonical| {
+                canonical
+                    .to_str()
+                    .and_then(|canonical_path| self.matching_rule_for_text(canonical_path))
+            })
     }
 
     pub fn should_block(&self, path: &str) -> bool {
@@ -143,5 +157,32 @@ mod tests {
         // 無効なパターン（例: 開き角括弧 "[" のみ）を渡した場合、Err を返すことを期待する
         let res = PathGuard::new(vec!["[".to_string()], PathAction::Block);
         assert!(res.is_err(), "Expected error for invalid pattern '[', but got Ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_path_guard_block_canonical_symlink_target() -> std::io::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "llm-veil-path-guard-{}",
+            std::process::id()
+        ));
+        let ssh_dir = root.join(".ssh");
+        std::fs::create_dir_all(&ssh_dir)?;
+        let secret_file = ssh_dir.join("id_rsa");
+        std::fs::write(&secret_file, "secret")?;
+        let public_link = root.join("public_key");
+        let _ = std::fs::remove_file(&public_link);
+        symlink(&secret_file, &public_link)?;
+
+        let guard = PathGuard::new(vec![".ssh/".to_string()], PathAction::Block).unwrap();
+        assert_eq!(
+            guard.block_rule(public_link.to_str().unwrap()),
+            Some(".ssh/")
+        );
+
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 }
