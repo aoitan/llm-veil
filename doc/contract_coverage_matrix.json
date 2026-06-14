@@ -263,7 +263,7 @@
       "observability": ["stdout", "stderr", "snapshot"],
       "expected_exit_code": 1,
       "priority": "required",
-      "status": "untested",
+      "status": "verified",
       "notes": "Red-team gap: default .git directory protection should be observable."
     },
     {
@@ -273,7 +273,7 @@
       "observability": ["stdout", "stderr", "snapshot"],
       "expected_exit_code": 1,
       "priority": "required",
-      "status": "untested",
+      "status": "verified",
       "notes": "Red-team gap: near-name secret files need an explicit policy decision."
     },
     {

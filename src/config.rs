@@ -30,6 +30,7 @@ impl Default for Config {
         Self {
             blocked_patterns: vec![
                 ".env".to_string(),
+                ".env*".to_string(),
                 "*.pem".to_string(),
                 "*.key".to_string(),
                 "*.p12".to_string(),

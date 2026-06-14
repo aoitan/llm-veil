@@ -178,9 +178,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_path_guard_block_canonical_symlink_target() {
+        use std::fs::{self, File};
+        use std::os::unix::fs::symlink;
+        use uuid::Uuid;
+
+        let temp_dir = std::env::temp_dir().join(format!("llm-veil-symlink-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let target_path = temp_dir.join("id_rsa");
+        File::create(&target_path).unwrap();
+
+        let link_path = temp_dir.join("link_id_rsa");
+        #[cfg(unix)]
+        {
+            if symlink(&target_path, &link_path).is_ok() {
+                let guard = PathGuard::new(
+                    vec!["id_rsa".to_string()],
+                    PathAction::Block,
+                ).unwrap();
+
+                // シンボリックリンクの指し示す先がブロック対象であれば、リンク自身もブロックされるべき
+                assert!(guard.should_block(link_path.to_str().unwrap()));
+            }
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_path_guard_block_path_traversal() {
+        let guard = PathGuard::new(
+            vec![".env".to_string()],
+            PathAction::Block,
+        ).unwrap();
+
+        // パストラバーサル経路であってもブロックされるべき
+        assert!(guard.should_block("foo/../.env"));
+        assert!(guard.should_block("./foo/../.env"));
+    }
+
+    #[test]
+    fn test_path_guard_block_windows_separator() {
+        let guard = PathGuard::new(
+            vec![".ssh/".to_string()],
+            PathAction::Block,
+        ).unwrap();
+
+        // Windowsのバックスラッシュ区切りであってもブロックされるべき
+        assert!(guard.should_block(r"fixtures\.ssh\id_rsa"));
+    }
+
     #[cfg(unix)]
     #[test]
-    fn test_path_guard_block_canonical_symlink_target() -> std::io::Result<()> {
+    fn test_path_guard_block_canonical_symlink_target_old() -> std::io::Result<()> {
         use std::os::unix::fs::symlink;
 
         let root = std::env::temp_dir().join(format!("llm-veil-path-guard-{}", std::process::id()));

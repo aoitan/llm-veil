@@ -75,6 +75,22 @@
     {
       "blocked": true,
       "exit_code": 1,
+      "name": "cat .git/config",
+      "path_rule": ".git/",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "cat .env.local",
+      "path_rule": ".env*",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
       "name": "cat absolute path outside workspace",
       "path_rule": "workspace_boundary",
       "reason": "path_blocked",

@@ -80,7 +80,8 @@ def write_fixture(root: Path) -> dict[str, Path]:
     grep_dir = fixtures / "grep"
     ssh_dir = fixtures / ".ssh"
     aws_dir = fixtures / ".aws"
-    for path in [cat_dir, grep_dir, ssh_dir, aws_dir]:
+    git_dir = fixtures / ".git"
+    for path in [cat_dir, grep_dir, ssh_dir, aws_dir, git_dir]:
         path.mkdir(parents=True)
 
     paths = {
@@ -100,6 +101,8 @@ def write_fixture(root: Path) -> dict[str, Path]:
         "large": cat_dir / "large.txt",
         "grep_auth": grep_dir / "auth.ts",
         "grep_config": grep_dir / "config.ts",
+        "git_config": git_dir / "config",
+        "env_local": fixtures / ".env.local",
     }
 
     paths["normal"].write_text("plain text\nno secrets here\n", encoding="utf-8")
@@ -121,6 +124,8 @@ def write_fixture(root: Path) -> dict[str, Path]:
     paths["env"].write_text("PASSWORD=super_secret_pass\n", encoding="utf-8")
     paths["ssh"].write_text("PRIVATE_KEY=super_secret_pass\n", encoding="utf-8")
     paths["aws"].write_text("aws_secret_access_key=super_secret_pass\n", encoding="utf-8")
+    paths["git_config"].write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+    paths["env_local"].write_text("API_SECRET=super_secret_pass\n", encoding="utf-8")
     paths["ssh_symlink"].symlink_to(paths["ssh"])
     paths["ssh_dir_symlink"].symlink_to(ssh_dir, target_is_directory=True)
     paths["ssh_traversal"] = (
@@ -532,6 +537,8 @@ def main(argv: list[str] | None = None) -> int:
             ("cat symlink to blocked file", paths["ssh_symlink"], ".ssh/"),
             ("cat path traversal to blocked file", paths["ssh_traversal"], ".ssh/"),
             ("cat windows-style blocked path", r"fixtures\.ssh\id_rsa", ".ssh/"),
+            ("cat .git/config", paths["git_config"], ".git/"),
+            ("cat .env.local", paths["env_local"], ".env*"),
         ]
         for name, path, rule in dangerous_cases:
             result = run([str(VEIL), "cat", str(path)], env, name)
