@@ -7,10 +7,21 @@ pub struct Redactor {
 
 impl Redactor {
     pub fn new() -> Self {
-        let rules = vec![
+        Self::with_home_path(
+            std::env::var_os("HOME")
+                .and_then(|value| value.into_string().ok()),
+        )
+    }
+
+    fn with_home_path(home: Option<String>) -> Self {
+        let mut rules = vec![
             (
-                Regex::new(r#"(?i)(^|[^A-Za-z0-9_]|\\[rn])(password|secret(?:_key)?|token|api[_-]?key)(\s*[:=]\s*)(["']?)([^\s'"\r\n;\\]+)(["']?)"#).unwrap(),
+                Regex::new(r#"(?i)(^|[^A-Za-z0-9_]|\\[rn])(password|secret(?:_key)?|token|api[_-]?key)(\s*[:=]\s*)(\\?["'])([^'"\r\n]*?)(\\?["'])"#).unwrap(),
                 "${1}${2}${3}${4}[REDACTED_SECRET]${6}".to_string()
+            ),
+            (
+                Regex::new(r#"(?i)(^|[^A-Za-z0-9_]|\\[rn])(password|secret(?:_key)?|token|api[_-]?key)(\s*[:=]\s*)([^\s'"\r\n;\\]+)"#).unwrap(),
+                "${1}${2}${3}[REDACTED_SECRET]".to_string()
             ),
             (
                 Regex::new(r#"(?i)(authorization\s*:\s*bearer\s+)([^\s'"\r\n]+)"#).unwrap(),
@@ -37,7 +48,18 @@ impl Redactor {
                 Regex::new(r"/(Users|home)/[a-zA-Z0-9_-]+").unwrap(),
                 "[REDACTED_PATH]".to_string()
             ),
+            (
+                Regex::new(r"(?i)[A-Z]:\\Users\\[a-zA-Z0-9_.-]+").unwrap(),
+                "[REDACTED_PATH]".to_string()
+            ),
         ];
+
+        if let Some(home) = home.filter(|value| !value.is_empty() && value != "/") {
+            rules.push((
+                Regex::new(&regex::escape(&home)).unwrap(),
+                "[REDACTED_PATH]".to_string(),
+            ));
+        }
 
         let detect_patterns = vec![
             r#"(?i)(^|[^A-Za-z0-9_]|\\[rn])(password|secret(?:_key)?|token|api[_-]?key)\s*[:=]"#,
@@ -120,6 +142,23 @@ mod tests {
     }
 
     #[test]
+    fn test_redactor_redacts_quoted_secret_with_spaces() {
+        let redactor = Redactor::new();
+
+        let double_quoted = redactor.redact(r#"password = "my super secret""#);
+        assert_eq!(double_quoted, "password = \"[REDACTED_SECRET]\"");
+        assert!(!double_quoted.contains("my super secret"));
+
+        let single_quoted = redactor.redact("api_key='value with spaces'");
+        assert_eq!(single_quoted, "api_key='[REDACTED_SECRET]'");
+        assert!(!single_quoted.contains("value with spaces"));
+
+        let escaped_quoted = redactor.redact(r#"printf "password=\"shell escaped value\"""#);
+        assert_eq!(escaped_quoted, r#"printf "password=\"[REDACTED_SECRET]\"""#);
+        assert!(!escaped_quoted.contains("shell escaped value"));
+    }
+
+    #[test]
     fn test_count_redactions_counts_new_markers_only() {
         assert_eq!(
             Redactor::count_redactions("token=abc", "token=[REDACTED_SECRET]"),
@@ -142,5 +181,25 @@ mod tests {
         let output = redactor.redact(input);
         assert!(output.contains("[REDACTED_PATH]"));
         assert!(!output.contains("aoitan"));
+    }
+
+    #[test]
+    fn test_redactor_redacts_windows_user_absolute_path() {
+        let redactor = Redactor::new();
+        let input = r#"C:\Users\aoitan\workspace\file.txt:1:token=abc123"#;
+        let output = redactor.redact(input);
+        assert!(output.contains(r#"[REDACTED_PATH]\workspace\file.txt"#));
+        assert!(!output.contains("aoitan"));
+    }
+
+    #[test]
+    fn test_redactor_redacts_configured_home_directory() {
+        let home = "/mnt/company/alice";
+        let redactor = Redactor::with_home_path(Some(home.to_string()));
+        let input = format!("{home}/workspace/project/src/main.rs:1:fn main() {{}}");
+        let output = redactor.redact(&input);
+
+        assert!(output.contains("[REDACTED_PATH]/workspace/project"));
+        assert!(!output.contains(&home));
     }
 }

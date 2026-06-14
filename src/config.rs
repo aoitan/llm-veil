@@ -28,7 +28,7 @@ impl Default for Config {
                 "dist/".to_string(),
                 "build/".to_string(),
             ],
-            action: PathAction::Redact,
+            action: PathAction::Block,
             timeout_seconds: 30,
             max_chars: 12000,
         }
@@ -65,7 +65,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.timeout_seconds, 30);
         assert_eq!(config.max_chars, 12000);
-        assert_eq!(config.action, PathAction::Redact);
+        assert_eq!(config.action, PathAction::Block);
         assert!(config.blocked_patterns.contains(&".env".to_string()));
     }
 }

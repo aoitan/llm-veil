@@ -26,6 +26,8 @@ struct FilteredOutput {
     redactions: usize,
 }
 
+const CAT_SECRET_BLOCKED_ERROR: &str = "File contains secret patterns and was blocked";
+
 fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
     let redacted = redactor.redact(content);
     let redactions = Redactor::count_redactions(content, &redacted);
@@ -70,6 +72,11 @@ fn main() {
     match cli.command {
         cli::Commands::Cat { file } => {
             if let Err(e) = handle_cat(&file, &path_guard, &redactor, &injector, &config) {
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && e.to_string() == CAT_SECRET_BLOCKED_ERROR
+                {
+                    std::process::exit(1);
+                }
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -112,6 +119,11 @@ fn handle_cat(
 ) -> io::Result<()> {
     // 危険パスのブロック
     if path_guard.should_block(file_path) {
+        let status = blocked_cat_output("path_blocked", 0);
+        let final_output = utils::wrap_untrusted(&status);
+
+        println!("{}", final_output);
+
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Access to blocked path was denied",
@@ -159,7 +171,7 @@ fn handle_cat(
 
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "File contains secret patterns and was blocked",
+            CAT_SECRET_BLOCKED_ERROR,
         ));
     }
 
@@ -465,24 +477,33 @@ fn handle_report(run_id: Option<&str>) -> io::Result<()> {
 }
 
 fn print_stats_to_stderr(stats: &Stats) {
-    eprintln!("\n[llm-veil stats]");
-    eprintln!("run_id: {}", stats.run_id);
+    let redactor = Redactor::new();
+    eprint!("{}", format_stats_for_stderr(stats, &redactor));
+}
+
+fn format_stats_for_stderr(stats: &Stats, redactor: &Redactor) -> String {
+    let mut output = String::new();
+
+    output.push_str("\n[llm-veil stats]\n");
+    output.push_str(&format!("run_id: {}\n", stats.run_id));
     if let Some(cmd) = &stats.command {
-        eprintln!("command: {}", cmd);
+        output.push_str(&format!("command: {}\n", redactor.redact(cmd)));
     }
     if let Some(code) = stats.exit_code {
-        eprintln!("exit_code: {}", code);
+        output.push_str(&format!("exit_code: {}\n", code));
     }
-    eprintln!("raw_bytes: {}", stats.raw_bytes);
-    eprintln!("returned_bytes: {}", stats.returned_bytes);
-    eprintln!("reduction: {:.1}%", stats.reduction);
-    eprintln!("redactions: {}", stats.redactions);
-    eprintln!(
-        "prompt_injection_warnings: {}",
+    output.push_str(&format!("raw_bytes: {}\n", stats.raw_bytes));
+    output.push_str(&format!("returned_bytes: {}\n", stats.returned_bytes));
+    output.push_str(&format!("reduction: {:.1}%\n", stats.reduction));
+    output.push_str(&format!("redactions: {}\n", stats.redactions));
+    output.push_str(&format!(
+        "prompt_injection_warnings: {}\n",
         stats.prompt_injection_warnings
-    );
-    eprintln!("truncated: {}", stats.truncated);
-    eprintln!("timeout: {}", stats.timeout);
+    ));
+    output.push_str(&format!("truncated: {}\n", stats.truncated));
+    output.push_str(&format!("timeout: {}\n", stats.timeout));
+
+    output
 }
 
 #[cfg(test)]
@@ -546,6 +567,29 @@ mod tests {
         assert!(res.is_err());
         let err = res.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!(err.to_string(), "File contains secret patterns and was blocked");
+        assert_eq!(err.to_string(), CAT_SECRET_BLOCKED_ERROR);
+    }
+
+    #[test]
+    fn test_stats_stderr_formatter_redacts_command() {
+        let redactor = Redactor::new();
+        let stats = Stats {
+            run_id: Uuid::new_v4().to_string(),
+            command: Some("sh -c 'printf SECRET_KEY=12345'".to_string()),
+            exit_code: Some(0),
+            raw_bytes: 16,
+            returned_bytes: 16,
+            reduction: 0.0,
+            redactions: 0,
+            prompt_injection_warnings: 0,
+            truncated: false,
+            timeout: false,
+            timestamp: Utc::now().to_rfc3339(),
+        };
+
+        let output = format_stats_for_stderr(&stats, &redactor);
+
+        assert!(output.contains("SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(!output.contains("12345"));
     }
 }
