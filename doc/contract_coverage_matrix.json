@@ -223,8 +223,8 @@
       "observability": ["stdout", "stderr", "snapshot"],
       "expected_exit_code": 1,
       "priority": "required",
-      "status": "untested",
-      "notes": "Red-team gap: string matching does not prove protection for symlinks."
+      "status": "verified",
+      "notes": "Canonical path matching blocks safe-looking symlinks to blocked paths."
     },
     {
       "case": "cat path traversal to blocked file",
@@ -233,8 +233,8 @@
       "observability": ["stdout", "stderr", "snapshot"],
       "expected_exit_code": 1,
       "priority": "required",
-      "status": "untested",
-      "notes": "Red-team gap: foo/../.env and repeated ./ normalization are not specified."
+      "status": "verified",
+      "notes": "Canonical path matching blocks traversal through symlinks to blocked paths."
     },
     {
       "case": "cat absolute path outside workspace",
@@ -243,8 +243,8 @@
       "observability": ["stdout", "stderr", "snapshot"],
       "expected_exit_code": 1,
       "priority": "required",
-      "status": "untested",
-      "notes": "Red-team gap: workspace boundary and canonical path policy are not specified."
+      "status": "verified",
+      "notes": "Canonical paths outside the current workspace are blocked before file reads."
     },
     {
       "case": "cat windows-style blocked path",
@@ -253,8 +253,8 @@
       "observability": ["stdout", "stderr", "snapshot"],
       "expected_exit_code": 1,
       "priority": "required",
-      "status": "untested",
-      "notes": "Red-team gap: backslash path handling is not specified."
+      "status": "verified",
+      "notes": "Backslash-separated dangerous paths are normalized before path-rule matching."
     },
     {
       "case": "cat .git/config",

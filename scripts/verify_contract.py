@@ -59,9 +59,10 @@ class CommandResult:
 
 
 def run(args: list[str], env: dict[str, str], name: str) -> CommandResult:
+    cwd = Path(env.get("LLM_VEIL_WORKSPACE_ROOT", REPO_ROOT))
     proc = subprocess.run(
         args,
-        cwd=REPO_ROOT,
+        cwd=cwd,
         env=env,
         text=True,
         stdout=subprocess.PIPE,
@@ -91,6 +92,8 @@ def write_fixture(root: Path) -> dict[str, Path]:
         "ssh": ssh_dir / "id_rsa",
         "aws": aws_dir / "credentials",
         "ssh_composite": ssh_dir / "composite_secret.txt",
+        "ssh_symlink": cat_dir / "public_key",
+        "ssh_dir_symlink": fixtures / "public_ssh",
         "base64_secret": cat_dir / "base64_secret.txt",
         "multiline_secret": cat_dir / "multiline_secret.yaml",
         "prompt_injection": cat_dir / "prompt_injection.txt",
@@ -118,6 +121,11 @@ def write_fixture(root: Path) -> dict[str, Path]:
     paths["env"].write_text("PASSWORD=super_secret_pass\n", encoding="utf-8")
     paths["ssh"].write_text("PRIVATE_KEY=super_secret_pass\n", encoding="utf-8")
     paths["aws"].write_text("aws_secret_access_key=super_secret_pass\n", encoding="utf-8")
+    paths["ssh_symlink"].symlink_to(paths["ssh"])
+    paths["ssh_dir_symlink"].symlink_to(ssh_dir, target_is_directory=True)
+    paths["ssh_traversal"] = (
+        paths["ssh_dir_symlink"] / ".." / paths["ssh_dir_symlink"].name / "id_rsa"
+    )
     paths["ssh_composite"].write_text(
         "password=super_secret_pass\n"
         "Authorization: Bearer my_jwt_token\n"
@@ -478,8 +486,11 @@ def main(argv: list[str] | None = None) -> int:
         return build.returncode
 
     tmp_root = Path(tempfile.mkdtemp(prefix="llm-veil-contract-"))
+    outside_root = Path(tempfile.mkdtemp(prefix="llm-veil-outside-workspace-"))
     try:
         paths = write_fixture(tmp_root)
+        outside_workspace_file = outside_root / "outside.txt"
+        outside_workspace_file.write_text("plain outside workspace\n", encoding="utf-8")
         home = tmp_root / "home"
         temp = tmp_root / "temp"
         run_tmp = tmp_root
@@ -492,6 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         env["TEMP"] = str(temp)
         env["TMP"] = str(temp)
         env["TOKEN"] = "env_token_13579"
+        env["LLM_VEIL_WORKSPACE_ROOT"] = str(tmp_root)
         config_dir = home / ".config" / "llm-veil"
         config_path = config_dir / "config.json"
 
@@ -502,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
                 temp,
                 tmp_root,
                 tmp_root / "fixtures",
+                outside_root,
                 REPO_ROOT,
             ]
         )
@@ -516,6 +529,9 @@ def main(argv: list[str] | None = None) -> int:
             ("cat .ssh/", paths["ssh"], ".ssh/"),
             ("cat .aws/", paths["aws"], ".aws/"),
             ("cat composite blocked path", paths["ssh_composite"], ".ssh/"),
+            ("cat symlink to blocked file", paths["ssh_symlink"], ".ssh/"),
+            ("cat path traversal to blocked file", paths["ssh_traversal"], ".ssh/"),
+            ("cat windows-style blocked path", r"fixtures\.ssh\id_rsa", ".ssh/"),
         ]
         for name, path, rule in dangerous_cases:
             result = run([str(VEIL), "cat", str(path)], env, name)
@@ -525,6 +541,21 @@ def main(argv: list[str] | None = None) -> int:
                     result, reason="path_blocked", path_rule=rule, redactions_min=0
                 )
             )
+
+        outside_workspace_cat = run(
+            [str(VEIL), "cat", str(outside_workspace_file)],
+            env,
+            "cat absolute path outside workspace",
+        )
+        results.append(outside_workspace_cat)
+        failures.extend(
+            assert_block_contract(
+                outside_workspace_cat,
+                reason="path_blocked",
+                path_rule="workspace_boundary",
+                redactions_min=0,
+            )
+        )
 
         secret_cat = run([str(VEIL), "cat", str(paths["secrets"])], env, "cat secret")
         results.append(secret_cat)
@@ -894,6 +925,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
+        shutil.rmtree(outside_root, ignore_errors=True)
 
 
 if __name__ == "__main__":

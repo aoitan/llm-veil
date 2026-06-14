@@ -2,7 +2,7 @@ use chrono::Utc;
 use clap::Parser;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -30,6 +30,7 @@ struct FilteredOutput {
 const CAT_SECRET_BLOCKED_ERROR: &str = "File contains secret patterns and was blocked";
 const CAT_PROMPT_INJECTION_BLOCKED_ERROR: &str =
     "File contains prompt-injection patterns and was blocked";
+const WORKSPACE_BOUNDARY_RULE: &str = "workspace_boundary";
 
 fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
     let redacted = redactor.redact(content);
@@ -56,6 +57,17 @@ fn sanitized_blocked_cat_output(
 ) -> String {
     let status = blocked_cat_output(reason, path_rule, redactions);
     final_output_filter(&status, redactor).content
+}
+
+fn is_inside_workspace(file_path: &str) -> io::Result<bool> {
+    let workspace = std::env::var_os("LLM_VEIL_WORKSPACE_ROOT")
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?)
+        .canonicalize()?;
+    let target = PathBuf::from(file_path).canonicalize()?;
+
+    Ok(target.starts_with(workspace))
 }
 
 fn main() {
@@ -157,6 +169,19 @@ fn handle_cat(
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Access to blocked path was denied",
+        ));
+    }
+
+    if !is_inside_workspace(file_path)? {
+        let status =
+            sanitized_blocked_cat_output("path_blocked", WORKSPACE_BOUNDARY_RULE, 0, redactor);
+        let final_output = utils::wrap_untrusted(&status);
+
+        println!("{}", final_output);
+
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "Access outside workspace was denied",
         ));
     }
 
@@ -638,7 +663,9 @@ mod tests {
 
     #[test]
     fn test_handle_cat_blocks_secrets() {
-        let file_path = std::env::temp_dir().join(format!("llm-veil-cat-{}.txt", Uuid::new_v4()));
+        let file_path = std::env::current_dir()
+            .unwrap()
+            .join(format!("llm-veil-cat-{}.txt", Uuid::new_v4()));
         let mut file = fs::File::create(&file_path).unwrap();
         writeln!(file, "export API_KEY=AIzaSyAThisIsAFakeApiKeyForTesting").unwrap();
 
