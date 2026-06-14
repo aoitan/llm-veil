@@ -27,6 +27,16 @@ pub fn save_stats(stats: &Stats) -> Result<(), io::Error> {
     fs::create_dir_all(&dir)?;
 
     let file_path = dir.join(format!("{}.json", stats.run_id));
+    let json = sanitized_stats_json(stats)?;
+    fs::write(&file_path, json)?;
+
+    let last_run_path = dir.join("last_run");
+    fs::write(&last_run_path, &stats.run_id)?;
+
+    Ok(())
+}
+
+pub fn sanitized_stats_json(stats: &Stats) -> Result<String, io::Error> {
     let redactor = Redactor::new();
     let mut sanitized_stats = stats.clone();
     sanitized_stats.command = stats
@@ -36,13 +46,7 @@ pub fn save_stats(stats: &Stats) -> Result<(), io::Error> {
 
     let json = serde_json::to_string_pretty(&sanitized_stats)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let json = redactor.redact(&json);
-    fs::write(&file_path, json)?;
-
-    let last_run_path = dir.join("last_run");
-    fs::write(&last_run_path, &stats.run_id)?;
-
-    Ok(())
+    Ok(redactor.redact(&json))
 }
 
 pub fn load_stats(run_id: &str) -> Result<Stats, io::Error> {

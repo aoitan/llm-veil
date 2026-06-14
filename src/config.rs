@@ -1,12 +1,26 @@
+use crate::path_guard::PathAction;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
-use crate::path_guard::PathAction;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PromptInjectionAction {
+    Warn,
+    Block,
+}
+
+impl Default for PromptInjectionAction {
+    fn default() -> Self {
+        Self::Block
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct Config {
     pub blocked_patterns: Vec<String>,
     pub action: PathAction,
+    pub prompt_injection_action: PromptInjectionAction,
     pub timeout_seconds: u64,
     pub max_chars: usize,
 }
@@ -29,6 +43,7 @@ impl Default for Config {
                 "build/".to_string(),
             ],
             action: PathAction::Block,
+            prompt_injection_action: PromptInjectionAction::Block,
             timeout_seconds: 30,
             max_chars: 12000,
         }
@@ -39,7 +54,12 @@ fn get_config_path() -> Option<PathBuf> {
     let home = std::env::var("HOME")
         .ok()
         .or_else(|| std::env::var("USERPROFILE").ok())?;
-    Some(PathBuf::from(home).join(".config").join("llm-veil").join("config.json"))
+    Some(
+        PathBuf::from(home)
+            .join(".config")
+            .join("llm-veil")
+            .join("config.json"),
+    )
 }
 
 pub fn load_config() -> Config {
@@ -66,6 +86,23 @@ mod tests {
         assert_eq!(config.timeout_seconds, 30);
         assert_eq!(config.max_chars, 12000);
         assert_eq!(config.action, PathAction::Block);
+        assert_eq!(config.prompt_injection_action, PromptInjectionAction::Block);
         assert!(config.blocked_patterns.contains(&".env".to_string()));
+    }
+
+    #[test]
+    fn test_config_accepts_prompt_injection_warn_action() {
+        let config: Config = serde_json::from_str(
+            r#"{
+                "blocked_patterns": [],
+                "action": "Allow",
+                "prompt_injection_action": "Warn",
+                "timeout_seconds": 10,
+                "max_chars": 1000
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.prompt_injection_action, PromptInjectionAction::Warn);
     }
 }

@@ -16,6 +16,7 @@ mod stats;
 mod truncator;
 mod utils;
 
+use config::PromptInjectionAction;
 use injector::Injector;
 use path_guard::{PathAction, PathGuard};
 use redactor::Redactor;
@@ -27,6 +28,8 @@ struct FilteredOutput {
 }
 
 const CAT_SECRET_BLOCKED_ERROR: &str = "File contains secret patterns and was blocked";
+const CAT_PROMPT_INJECTION_BLOCKED_ERROR: &str =
+    "File contains prompt-injection patterns and was blocked";
 
 fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
     let redacted = redactor.redact(content);
@@ -38,11 +41,21 @@ fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
     }
 }
 
-fn blocked_cat_output(reason: &str, redactions: usize) -> String {
+fn blocked_cat_output(reason: &str, path_rule: &str, redactions: usize) -> String {
     format!(
-        "blocked: true\nreason: {}\npath_rule: content_secret_scan\nredactions: {}\nexit_code: 1",
-        reason, redactions
+        "blocked: true\nreason: {}\npath_rule: {}\nredactions: {}\nexit_code: 1",
+        reason, path_rule, redactions
     )
+}
+
+fn sanitized_blocked_cat_output(
+    reason: &str,
+    path_rule: &str,
+    redactions: usize,
+    redactor: &Redactor,
+) -> String {
+    let status = blocked_cat_output(reason, path_rule, redactions);
+    final_output_filter(&status, redactor).content
 }
 
 fn main() {
@@ -73,7 +86,8 @@ fn main() {
         cli::Commands::Cat { file } => {
             if let Err(e) = handle_cat(&file, &path_guard, &redactor, &injector, &config) {
                 if e.kind() == io::ErrorKind::PermissionDenied
-                    && e.to_string() == CAT_SECRET_BLOCKED_ERROR
+                    && (e.to_string() == CAT_SECRET_BLOCKED_ERROR
+                        || e.to_string() == CAT_PROMPT_INJECTION_BLOCKED_ERROR)
                 {
                     std::process::exit(1);
                 }
@@ -95,8 +109,18 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        cli::Commands::Run { command } => {
-            if let Err(e) = handle_run(&command, &path_guard, &redactor, &injector, &config) {
+        cli::Commands::Run {
+            report_json,
+            command,
+        } => {
+            if let Err(e) = handle_run(
+                &command,
+                report_json.as_deref(),
+                &path_guard,
+                &redactor,
+                &injector,
+                &config,
+            ) {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
@@ -118,8 +142,8 @@ fn handle_cat(
     config: &config::Config,
 ) -> io::Result<()> {
     // 危険パスのブロック
-    if path_guard.should_block(file_path) {
-        let status = blocked_cat_output("path_blocked", 0);
+    if let Some(path_rule) = path_guard.block_rule(file_path) {
+        let status = sanitized_blocked_cat_output("path_blocked", path_rule, 0, redactor);
         let final_output = utils::wrap_untrusted(&status);
 
         println!("{}", final_output);
@@ -138,7 +162,7 @@ fn handle_cat(
     if redactor.has_secret(&content) {
         let redacted = redactor.redact(&content);
         let redactions = Redactor::count_redactions(&content, &redacted);
-        let status = blocked_cat_output("secret_detected", redactions);
+        let status = sanitized_blocked_cat_output("secret_detected", "", redactions, redactor);
         let warnings = injector.detect_injection(&redacted);
         let final_output = utils::wrap_untrusted(&status);
 
@@ -172,6 +196,51 @@ fn handle_cat(
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             CAT_SECRET_BLOCKED_ERROR,
+        ));
+    }
+
+    let redacted_for_scan = redactor.redact(&content);
+    let scan_redactions = Redactor::count_redactions(&content, &redacted_for_scan);
+    let warnings = injector.detect_injection(&redacted_for_scan);
+    if warnings > 0 && config.prompt_injection_action == PromptInjectionAction::Block {
+        let status = sanitized_blocked_cat_output(
+            "prompt_injection_detected",
+            "",
+            scan_redactions,
+            redactor,
+        );
+        let final_output = utils::wrap_untrusted(&status);
+
+        println!("{}", final_output);
+
+        let raw_bytes = bytes.len();
+        let returned_bytes = final_output.len();
+        let reduction = if raw_bytes > 0 {
+            ((raw_bytes as f64 - returned_bytes as f64) / raw_bytes as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let stats = Stats {
+            run_id: Uuid::new_v4().to_string(),
+            command: Some(redactor.redact(&format!("cat {}", file_path))),
+            exit_code: Some(1),
+            raw_bytes,
+            returned_bytes,
+            reduction: reduction.max(0.0),
+            redactions: scan_redactions,
+            prompt_injection_warnings: warnings,
+            truncated: false,
+            timeout: false,
+            timestamp: Utc::now().to_rfc3339(),
+        };
+
+        stats::save_stats(&stats)?;
+        print_stats_to_stderr(&stats);
+
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            CAT_PROMPT_INJECTION_BLOCKED_ERROR,
         ));
     }
 
@@ -396,13 +465,21 @@ fn truncate_lines(lines: &[String], max_lines: usize) -> (String, usize) {
 
 fn handle_run(
     command_args: &[String],
+    report_json: Option<&str>,
     path_guard: &PathGuard,
     redactor: &Redactor,
     injector: &Injector,
     config: &config::Config,
 ) -> io::Result<()> {
     let timeout_dur = Duration::from_secs(config.timeout_seconds);
-    let res = executor::execute_command(command_args, path_guard, redactor, injector, timeout_dur)?;
+    let res = executor::execute_command(
+        command_args,
+        path_guard,
+        redactor,
+        injector,
+        timeout_dur,
+        config.max_chars,
+    )?;
 
     let filtered_stdout = final_output_filter(&res.stdout, redactor);
     let filtered_stderr = final_output_filter(&res.stderr, redactor);
@@ -432,6 +509,9 @@ fn handle_run(
     stats.reduction = stats.reduction.max(0.0);
 
     stats::save_stats(&stats)?;
+    if let Some(path) = report_json {
+        write_stats_json(path, &stats)?;
+    }
     print_stats_to_stderr(&stats);
 
     if let Some(code) = res.stats.exit_code {
@@ -448,32 +528,43 @@ fn handle_report(run_id: Option<&str>) -> io::Result<()> {
         stats::load_last_stats()?
     };
     let redactor = Redactor::new();
+    let output = format_report_output(&stats, &redactor);
+
+    print!("{}", output);
+
+    Ok(())
+}
+
+fn write_stats_json(path: &str, stats: &Stats) -> io::Result<()> {
+    let json = stats::sanitized_stats_json(stats)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
+fn format_report_output(stats: &Stats, redactor: &Redactor) -> String {
     let command = stats
         .command
         .as_deref()
-        .map(|command| redactor.redact(command))
+        .map(|command| command.to_string())
         .unwrap_or_else(|| "-".to_string());
 
-    println!("command: {}", command);
-    println!(
-        "exit_code: {}",
+    let output = format!(
+        "command: {}\nexit_code: {}\nraw_bytes: {}\nreturned_bytes: {}\nreduction: {:.1}%\nredactions: {}\nprompt_injection_warnings: {}\ntruncated: {}\ntimeout: {}\n",
+        command,
         stats
             .exit_code
             .map(|c| c.to_string())
-            .unwrap_or_else(|| "-".to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        stats.raw_bytes,
+        stats.returned_bytes,
+        stats.reduction,
+        stats.redactions,
+        stats.prompt_injection_warnings,
+        stats.truncated,
+        stats.timeout
     );
-    println!("raw_bytes: {}", stats.raw_bytes);
-    println!("returned_bytes: {}", stats.returned_bytes);
-    println!("reduction: {:.1}%", stats.reduction);
-    println!("redactions: {}", stats.redactions);
-    println!(
-        "prompt_injection_warnings: {}",
-        stats.prompt_injection_warnings
-    );
-    println!("truncated: {}", stats.truncated);
-    println!("timeout: {}", stats.timeout);
 
-    Ok(())
+    final_output_filter(&output, redactor).content
 }
 
 fn print_stats_to_stderr(stats: &Stats) {
@@ -550,6 +641,7 @@ mod tests {
         let injector = Injector::new();
         let config = config::Config {
             action: PathAction::Allow,
+            prompt_injection_action: PromptInjectionAction::Block,
             timeout_seconds: 10,
             max_chars: 1000,
             blocked_patterns: vec![],
@@ -591,5 +683,40 @@ mod tests {
 
         assert!(output.contains("SECRET_KEY=[REDACTED_SECRET]"));
         assert!(!output.contains("12345"));
+    }
+
+    #[test]
+    fn test_report_formatter_applies_final_redactor_to_whole_output() {
+        let redactor = Redactor::new();
+        let stats = Stats {
+            run_id: Uuid::new_v4().to_string(),
+            command: Some("sh -c 'printf SECRET_KEY=12345'".to_string()),
+            exit_code: Some(0),
+            raw_bytes: 16,
+            returned_bytes: 16,
+            reduction: 0.0,
+            redactions: 0,
+            prompt_injection_warnings: 0,
+            truncated: false,
+            timeout: false,
+            timestamp: Utc::now().to_rfc3339(),
+        };
+
+        let output = format_report_output(&stats, &redactor);
+
+        assert!(output.contains("SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(!output.contains("12345"));
+    }
+
+    #[test]
+    fn test_blocked_cat_contract_output_redacts_path_rule() {
+        let redactor = Redactor::new();
+        let output =
+            sanitized_blocked_cat_output("path_blocked", "/Users/alice/.ssh/*", 0, &redactor);
+
+        assert!(output.contains("blocked: true"));
+        assert!(output.contains("reason: path_blocked"));
+        assert!(output.contains("path_rule: [REDACTED_PATH]/.ssh/*"));
+        assert!(!output.contains("/Users/alice"));
     }
 }

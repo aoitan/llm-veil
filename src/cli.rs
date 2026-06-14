@@ -23,9 +23,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug, Clone)]
 pub enum Commands {
     /// Read a file safely
-    Cat {
-        file: String,
-    },
+    Cat { file: String },
     /// Search patterns in path safely
     Grep {
         pattern: String,
@@ -33,11 +31,13 @@ pub enum Commands {
     },
     /// Run command safely
     Run {
+        /// Write sanitized execution metadata JSON to this file
+        #[arg(long)]
+        report_json: Option<String>,
+
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
     /// View stats of the execution
-    Report {
-        run_id: Option<String>,
-    },
+    Report { run_id: Option<String> },
 }

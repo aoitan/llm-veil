@@ -23,6 +23,7 @@ pub fn execute_command(
     redactor: &Redactor,
     injector: &Injector,
     timeout_duration: Duration,
+    max_chars: usize,
 ) -> Result<ExecutionResult, io::Error> {
     if command_args.is_empty() {
         return Err(io::Error::new(
@@ -85,10 +86,8 @@ pub fn execute_command(
     let prompt_injection_warnings =
         injector.detect_injection(&redacted_stdout) + injector.detect_injection(&redacted_stderr);
 
-    // トランケート (最大12,000文字)
-    let max_chars = 12000;
     let final_stdout = truncate(&redacted_stdout, max_chars);
-    let final_stderr = redacted_stderr;
+    let final_stderr = truncate(&redacted_stderr, max_chars);
 
     let raw_bytes = raw_stdout.len() + raw_stderr.len();
     let returned_bytes = final_stdout.len() + final_stderr.len();
@@ -100,7 +99,8 @@ pub fn execute_command(
     };
     let reduction = reduction.max(0.0);
 
-    let truncated = raw_stdout.chars().count() > max_chars;
+    let truncated =
+        redacted_stdout.chars().count() > max_chars || redacted_stderr.chars().count() > max_chars;
 
     let stats = Stats {
         run_id: Uuid::new_v4().to_string(),
@@ -142,6 +142,7 @@ mod tests {
             &redactor,
             &injector,
             Duration::from_secs(5),
+            12000,
         );
 
         assert!(result.is_ok());
@@ -165,6 +166,7 @@ mod tests {
             &redactor,
             &injector,
             Duration::from_millis(100),
+            12000,
         );
 
         assert!(result.is_ok());
@@ -186,6 +188,7 @@ mod tests {
             &redactor,
             &injector,
             Duration::from_secs(5),
+            12000,
         );
 
         // ブロックされた場合はエラーを返す
@@ -213,6 +216,7 @@ mod tests {
             &redactor,
             &injector,
             Duration::from_secs(5),
+            12000,
         );
 
         assert!(result.is_ok());
@@ -220,5 +224,32 @@ mod tests {
         let command = res.stats.command.unwrap();
         assert!(command.contains("SECRET_KEY=[REDACTED_SECRET]"));
         assert!(!command.contains("12345"));
+    }
+
+    #[test]
+    fn test_execute_truncates_stdout_and_stderr_with_configured_limit() {
+        let path_guard = PathGuard::new(vec![], PathAction::Allow);
+        let redactor = Redactor::new();
+        let injector = Injector::new();
+
+        let args = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf 'abcdefghijkl'; printf 'mnopqrstuvwx' >&2".to_string(),
+        ];
+        let result = execute_command(
+            &args,
+            &path_guard,
+            &redactor,
+            &injector,
+            Duration::from_secs(5),
+            8,
+        );
+
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(res.stdout.contains("[TRUNCATED: omitted 4 bytes]"));
+        assert!(res.stderr.contains("[TRUNCATED: omitted 4 bytes]"));
+        assert!(res.stats.truncated);
     }
 }
