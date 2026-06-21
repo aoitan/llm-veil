@@ -7,9 +7,72 @@ use chrono::Utc;
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 use wait_timeout::ChildExt;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+#[cfg(unix)]
+static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_shutdown_signal(signal: libc::c_int) {
+    RECEIVED_SIGNAL.store(signal, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn install_shutdown_signal_handlers() {
+    unsafe {
+        libc::signal(
+            libc::SIGINT,
+            record_shutdown_signal as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGTERM,
+            record_shutdown_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+#[cfg(unix)]
+fn reset_received_signal() {
+    RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+fn received_signal() -> Option<i32> {
+    let signal = RECEIVED_SIGNAL.load(Ordering::SeqCst);
+    (signal > 0).then_some(signal)
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_signal_handlers() {}
+
+#[cfg(not(unix))]
+fn reset_received_signal() {}
+
+#[cfg(not(unix))]
+fn received_signal() -> Option<i32> {
+    None
+}
+
+#[cfg(unix)]
+fn terminate_child(child: &mut std::process::Child) -> io::Result<()> {
+    let pgid = child.id() as libc::pid_t;
+    let kill_result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
+    if kill_result == -1 {
+        child.kill()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_child(child: &mut std::process::Child) -> io::Result<()> {
+    child.kill()
+}
 
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -26,6 +89,9 @@ pub fn execute_command(
     timeout_duration: Duration,
     max_chars: usize,
 ) -> Result<ExecutionResult, io::Error> {
+    reset_received_signal();
+    install_shutdown_signal_handlers();
+
     if command_args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -47,6 +113,8 @@ pub fn execute_command(
     cmd.args(&command_args[1..]);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    cmd.process_group(0);
     let (sanitized_env, env_redactions) = sanitized_environment(redactor);
     cmd.envs(sanitized_env);
 
@@ -56,24 +124,40 @@ pub fn execute_command(
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();
 
-    let exit_code = match child.wait_timeout(timeout_duration)? {
-        Some(status) => {
-            // 出力の読み出し
-            if let Some(mut stdout) = child.stdout.take() {
-                stdout.read_to_end(&mut stdout_bytes)?;
-            }
-            if let Some(mut stderr) = child.stderr.take() {
-                stderr.read_to_end(&mut stderr_bytes)?;
-            }
-            status.code()
+    let deadline = Instant::now() + timeout_duration;
+    let exit_code = loop {
+        if let Some(signal) = received_signal() {
+            let _ = terminate_child(&mut child);
+            let _ = child.wait();
+            break Some(128 + signal);
         }
-        None => {
+
+        let now = Instant::now();
+        if now >= deadline {
             timeout = true;
-            child.kill()?;
+            terminate_child(&mut child)?;
             let _ = child.wait(); // ゾンビプロセス化を防ぐ
-            Some(124)
+            break Some(124);
+        }
+
+        let wait_for = (deadline - now).min(Duration::from_millis(50));
+        match child.wait_timeout(wait_for)? {
+            Some(status) => {
+                break status
+                    .code()
+                    .or_else(|| received_signal().map(|signal| 128 + signal));
+            }
+            None => {}
         }
     };
+
+    // 終了、タイムアウト、中断のどの場合も同じ最終サニタイズ経路に渡す。
+    if let Some(mut stdout) = child.stdout.take() {
+        stdout.read_to_end(&mut stdout_bytes)?;
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        stderr.read_to_end(&mut stderr_bytes)?;
+    }
 
     let raw_stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
     let raw_stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
@@ -303,5 +387,40 @@ mod tests {
         assert!(res.stdout.contains("[TRUNCATED: omitted 4 bytes]"));
         assert!(res.stderr.contains("[TRUNCATED: omitted 4 bytes]"));
         assert!(res.stats.truncated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_execute_sanitizes_buffered_output_after_sigterm() {
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
+        let redactor = Redactor::new();
+        let injector = Injector::new();
+        let signaler = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(100));
+            unsafe {
+                libc::raise(libc::SIGTERM);
+            }
+        });
+
+        let args = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf 'SECRET_KEY=interrupt_token_97531\\n'; sleep 5".to_string(),
+        ];
+        let result = execute_command(
+            &args,
+            &path_guard,
+            &redactor,
+            &injector,
+            Duration::from_secs(5),
+            12000,
+        );
+
+        signaler.join().unwrap();
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert_eq!(res.stats.exit_code, Some(128 + libc::SIGTERM));
+        assert!(res.stdout.contains("SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(!res.stdout.contains("interrupt_token_97531"));
     }
 }

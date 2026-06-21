@@ -7,10 +7,12 @@ import argparse
 import difflib
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +37,7 @@ FORBIDDEN_RAW_VALUES = [
     "line_two_secret",
     "run_line_one_secret",
     "run_line_two_secret",
+    "interrupt_token_97531",
 ]
 
 
@@ -76,6 +79,32 @@ def run(args: list[str], env: dict[str, str], name: str) -> CommandResult:
         check=False,
     )
     return CommandResult(name, args, proc.returncode, proc.stdout, proc.stderr)
+
+
+def run_and_signal(
+    args: list[str],
+    env: dict[str, str],
+    name: str,
+    signal_to_send: signal.Signals,
+) -> CommandResult:
+    cwd = Path(
+        env.get(
+            "LLM_VEIL_CONTRACT_CWD",
+            env.get("LLM_VEIL_WORKSPACE_ROOT", str(REPO_ROOT)),
+        )
+    )
+    proc = subprocess.Popen(
+        args,
+        cwd=cwd,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.2)
+    proc.send_signal(signal_to_send)
+    stdout, stderr = proc.communicate(timeout=5)
+    return CommandResult(name, args, proc.returncode, stdout, stderr)
 
 
 def write_fixture(root: Path) -> dict[str, Path]:
@@ -511,14 +540,17 @@ def main(argv: list[str] | None = None) -> int:
         home.mkdir()
         temp.mkdir()
 
-        env = os.environ.copy()
-        env["HOME"] = str(home)
-        env["TMPDIR"] = str(run_tmp)
-        env["TEMP"] = str(temp)
-        env["TMP"] = str(temp)
-        env["TOKEN"] = "env_token_13579"
-        env["LLM_VEIL_WORKSPACE_ROOT"] = str(REPO_ROOT)
-        env["LLM_VEIL_CONTRACT_CWD"] = str(tmp_root)
+        env = {
+            "HOME": str(home),
+            "TMPDIR": str(run_tmp),
+            "TEMP": str(temp),
+            "TMP": str(temp),
+            "TOKEN": "env_token_13579",
+            "LLM_VEIL_WORKSPACE_ROOT": str(REPO_ROOT),
+            "LLM_VEIL_CONTRACT_CWD": str(tmp_root),
+        }
+        if "PATH" in os.environ:
+            env["PATH"] = os.environ["PATH"]
         config_dir = home / ".config" / "llm-veil"
         config_path = config_dir / "config.json"
 
@@ -544,6 +576,7 @@ def main(argv: list[str] | None = None) -> int:
             ("cat .ssh/", paths["ssh"], ".ssh/"),
             ("cat .aws/", paths["aws"], ".aws/"),
             ("cat composite blocked path", paths["ssh_composite"], ".ssh/"),
+            ("mixed block and redact policy", paths["ssh_composite"], ".ssh/"),
             ("cat symlink to blocked file", paths["ssh_symlink"], ".ssh/"),
             ("cat path traversal to blocked file", paths["ssh_traversal"], ".ssh/"),
             ("cat windows-style blocked path", r"fixtures\.ssh\id_rsa", ".ssh/"),
@@ -861,6 +894,85 @@ def main(argv: list[str] | None = None) -> int:
                     failures.append(
                         "run env secret --report-json: expected environment redactions >= 1"
                     )
+
+        run_sigterm_report = run_tmp / "run-sigterm-report.json"
+        run_sigterm = run_and_signal(
+            [
+                str(VEIL),
+                "run",
+                "--report-json",
+                str(run_sigterm_report),
+                "--",
+                "sh",
+                "-c",
+                "printf 'SECRET_KEY=interrupt_token_97531\\n'; sleep 5",
+            ],
+            env,
+            "run sigterm",
+            signal.SIGTERM,
+        )
+        results.append(run_sigterm)
+        if run_sigterm.returncode != 128 + signal.SIGTERM:
+            failures.append(
+                "run sigterm: expected process exit "
+                f"{128 + signal.SIGTERM}, got {run_sigterm.returncode}"
+            )
+        if "interrupt_token_97531" in run_sigterm.stdout + run_sigterm.stderr:
+            failures.append("run sigterm: leaked raw interrupted stdout secret")
+        if "[REDACTED_SECRET]" not in run_sigterm.stdout:
+            failures.append("run sigterm: expected interrupted stdout secret to be redacted")
+        if not run_sigterm_report.exists():
+            failures.append("run sigterm: expected --report-json file to be written")
+        else:
+            report_json = run_sigterm_report.read_text(encoding="utf-8")
+            failures.extend(
+                assert_no_forbidden_values(
+                    "run sigterm --report-json",
+                    report_json,
+                    forbidden_paths,
+                )
+            )
+            try:
+                sigterm_report = json.loads(report_json)
+            except json.JSONDecodeError as exc:
+                failures.append(f"run sigterm --report-json: invalid JSON metadata: {exc}")
+            else:
+                if sigterm_report.get("exit_code") != 128 + signal.SIGTERM:
+                    failures.append(
+                        "run sigterm --report-json: expected interrupted exit_code"
+                    )
+                if int(sigterm_report.get("redactions", 0)) < 1:
+                    failures.append("run sigterm --report-json: expected redactions >= 1")
+                if sigterm_report.get("timeout") is not False:
+                    failures.append("run sigterm --report-json: expected timeout=false")
+
+        run_blocked_path_side_effect = run_tmp / "run-blocked-path-spawned.txt"
+        run_blocked_path = run(
+            [
+                str(VEIL),
+                "run",
+                "--",
+                "sh",
+                "-c",
+                "printf spawned > run-blocked-path-spawned.txt",
+                str(paths["env"]),
+            ],
+            env,
+            "run blocked path",
+        )
+        results.append(run_blocked_path)
+        failures.extend(
+            assert_block_contract(
+                run_blocked_path,
+                reason="path_blocked",
+                path_rule=".env",
+                redactions_min=0,
+            )
+        )
+        if run_blocked_path_side_effect.exists():
+            failures.append(
+                "run blocked path: child process started despite direct blocked-path argument"
+            )
 
         run_timeout_report = run_tmp / "run-timeout-report.json"
         run_timeout = run(

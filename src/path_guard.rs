@@ -178,6 +178,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_path_guard_block_canonical_symlink_target() {
         use std::fs::{self, File};
@@ -192,15 +193,11 @@ mod tests {
         File::create(&target_path).unwrap();
 
         let link_path = temp_dir.join("link_id_rsa");
-        #[cfg(unix)]
-        {
-            if symlink(&target_path, &link_path).is_ok() {
-                let guard = PathGuard::new(vec!["id_rsa".to_string()], PathAction::Block).unwrap();
+        symlink(&target_path, &link_path).unwrap();
+        let guard = PathGuard::new(vec!["id_rsa".to_string()], PathAction::Block).unwrap();
 
-                // シンボリックリンクの指し示す先がブロック対象であれば、リンク自身もブロックされるべき
-                assert!(guard.should_block(link_path.to_str().unwrap()));
-            }
-        }
+        // シンボリックリンクの指し示す先がブロック対象であれば、リンク自身もブロックされるべき
+        assert!(guard.should_block(link_path.to_str().unwrap()));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -224,7 +221,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_path_guard_block_canonical_symlink_target_old() -> std::io::Result<()> {
+    fn test_path_guard_block_canonical_symlink_target_directory_rule() -> std::io::Result<()> {
         use std::os::unix::fs::symlink;
 
         let root = std::env::temp_dir().join(format!("llm-veil-path-guard-{}", std::process::id()));

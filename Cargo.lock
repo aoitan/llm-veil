@@ -342,6 +342,7 @@ dependencies = [
  "chrono",
  "clap",
  "glob",
+ "libc",
  "regex",
  "serde",
  "serde_json",

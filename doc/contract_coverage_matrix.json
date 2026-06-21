@@ -197,6 +197,36 @@
       "notes": "Environment-derived secrets are sanitized before the child observes them."
     },
     {
+      "case": "run sigterm",
+      "trigger": "execution-signal",
+      "command": "run",
+      "observability": ["stdout", "stderr", "report", "snapshot"],
+      "expected_exit_code": 143,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Interrupted run output is routed through the same final sanitization path before returning."
+    },
+    {
+      "case": "run blocked path",
+      "trigger": "path",
+      "command": "run",
+      "observability": ["stdout", "stderr", "snapshot"],
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "run preflights direct argv entries, emits the structured block record on stdout, exits 1, and does not start the child process. stderr is reserved for normal stats/errors and has no block-detail contract for this preflight failure."
+    },
+    {
+      "case": "run shell-embedded blocked path",
+      "trigger": "path",
+      "command": "run",
+      "observability": [],
+      "expected_exit_code": null,
+      "priority": "non-goal",
+      "status": "out_of_scope",
+      "notes": "Shell strings and program-internal strings such as sh -c 'cat .env' or python -c open('.env') are not parsed by the current run preflight contract; only direct argv entries are inspected."
+    },
+    {
       "case": "run timeout",
       "trigger": "execution",
       "command": "run",
@@ -281,10 +311,10 @@
       "trigger": "policy",
       "command": "cat",
       "observability": ["stdout", "stderr", "snapshot"],
-      "expected_exit_code": null,
-      "priority": "candidate",
-      "status": "untested",
-      "notes": "Red-team gap: per-pattern action is not supported by the current policy model."
+      "expected_exit_code": 1,
+      "priority": "required",
+      "status": "verified",
+      "notes": "Path blocking takes priority when blocked-path content also contains redactable secrets."
     }
   ]
 }

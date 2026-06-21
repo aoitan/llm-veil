@@ -51,6 +51,14 @@
     {
       "blocked": true,
       "exit_code": 1,
+      "name": "mixed block and redact policy",
+      "path_rule": ".ssh/",
+      "reason": "path_blocked",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
       "name": "cat symlink to blocked file",
       "path_rule": ".ssh/",
       "reason": "path_blocked",
@@ -198,6 +206,22 @@
       "name": "run env secret",
       "path_rule": "",
       "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": false,
+      "exit_code": 143,
+      "name": "run sigterm",
+      "path_rule": "",
+      "reason": "",
+      "redactions": 0
+    },
+    {
+      "blocked": true,
+      "exit_code": 1,
+      "name": "run blocked path",
+      "path_rule": ".env",
+      "reason": "path_blocked",
       "redactions": 0
     },
     {

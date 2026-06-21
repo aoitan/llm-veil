@@ -30,6 +30,7 @@ struct FilteredOutput {
 const CAT_SECRET_BLOCKED_ERROR: &str = "File contains secret patterns and was blocked";
 const CAT_PROMPT_INJECTION_BLOCKED_ERROR: &str =
     "File contains prompt-injection patterns and was blocked";
+const RUN_PATH_BLOCKED_ERROR: &str = "Command arguments contain a blocked path";
 const WORKSPACE_BOUNDARY_RULE: &str = "workspace_boundary";
 
 fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
@@ -57,6 +58,10 @@ fn sanitized_blocked_cat_output(
 ) -> String {
     let status = blocked_cat_output(reason, path_rule, redactions);
     final_output_filter(&status, redactor).content
+}
+
+fn format_error_for_stderr(message: &str, redactor: &Redactor) -> String {
+    final_output_filter(&format!("Error: {}", message), redactor).content
 }
 
 fn is_inside_workspace(file_path: &str) -> io::Result<bool> {
@@ -90,14 +95,20 @@ fn main() {
         config.max_chars = max_chars;
     }
 
+    let redactor = Redactor::new();
     let path_guard = match PathGuard::new(config.blocked_patterns.clone(), config.action) {
         Ok(pg) => pg,
         Err(e) => {
-            eprintln!("Error: Invalid pattern in configuration: {}", e);
+            eprintln!(
+                "{}",
+                format_error_for_stderr(
+                    &format!("Invalid pattern in configuration: {}", e),
+                    &redactor,
+                )
+            );
             std::process::exit(1);
         }
     };
-    let redactor = Redactor::new();
     let injector = Injector::new();
 
     match cli.command {
@@ -109,7 +120,7 @@ fn main() {
                 {
                     std::process::exit(1);
                 }
-                eprintln!("Error: {}", e);
+                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
                 std::process::exit(1);
             }
         }
@@ -123,7 +134,7 @@ fn main() {
                 &injector,
                 &config,
             ) {
-                eprintln!("Error: {}", e);
+                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
                 std::process::exit(1);
             }
         }
@@ -139,13 +150,18 @@ fn main() {
                 &injector,
                 &config,
             ) {
-                eprintln!("Error: {}", e);
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && e.to_string() == RUN_PATH_BLOCKED_ERROR
+                {
+                    std::process::exit(1);
+                }
+                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
                 std::process::exit(1);
             }
         }
         cli::Commands::Report { run_id } => {
             if let Err(e) = handle_report(run_id.as_deref()) {
-                eprintln!("Error: {}", e);
+                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
                 std::process::exit(1);
             }
         }
@@ -502,6 +518,20 @@ fn handle_run(
     injector: &Injector,
     config: &config::Config,
 ) -> io::Result<()> {
+    for arg in command_args {
+        if let Some(path_rule) = path_guard.block_rule(arg) {
+            let status = sanitized_blocked_cat_output("path_blocked", path_rule, 0, redactor);
+            let final_output = utils::wrap_untrusted(&status);
+
+            println!("{}", final_output);
+
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                RUN_PATH_BLOCKED_ERROR,
+            ));
+        }
+    }
+
     let timeout_dur = Duration::from_secs(config.timeout_seconds);
     let res = executor::execute_command(
         command_args,
@@ -774,5 +804,14 @@ mod tests {
         assert!(output.contains("reason: path_blocked"));
         assert!(output.contains("path_rule: [REDACTED_PATH]/.ssh/*"));
         assert!(!output.contains("/Users/alice"));
+    }
+
+    #[test]
+    fn test_error_formatter_applies_final_redactor() {
+        let redactor = Redactor::new();
+        let output = format_error_for_stderr("failed with SECRET_KEY=12345", &redactor);
+
+        assert!(output.contains("Error: failed with SECRET_KEY=[REDACTED_SECRET]"));
+        assert!(!output.contains("12345"));
     }
 }
