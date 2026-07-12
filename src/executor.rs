@@ -252,10 +252,18 @@ fn sanitized_env_value(key: &str, value: &str, redactor: &Redactor) -> (String, 
 mod tests {
     use super::*;
     use crate::path_guard::PathAction;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn get_test_lock() -> &'static Mutex<()> {
+        TEST_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_execute_simple_command() {
+        let _guard = get_test_lock().lock().unwrap();
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -279,6 +287,7 @@ mod tests {
 
     #[test]
     fn test_execute_timeout() {
+        let _guard = get_test_lock().lock().unwrap();
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -296,12 +305,13 @@ mod tests {
 
         assert!(result.is_ok());
         let res = result.unwrap();
-        assert!(res.stats.timeout);
+        assert!(res.stats.timeout, "Expected timeout to be true, but got res={:?}", res);
         assert_eq!(res.stats.exit_code, Some(124));
     }
 
     #[test]
     fn test_execute_blocked_path() {
+        let _guard = get_test_lock().lock().unwrap();
         let path_guard = PathGuard::new(vec![".env".to_string()], PathAction::Block).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -327,6 +337,7 @@ mod tests {
 
     #[test]
     fn test_execute_redacts_secret_in_command_metadata() {
+        let _guard = get_test_lock().lock().unwrap();
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -364,6 +375,7 @@ mod tests {
 
     #[test]
     fn test_execute_truncates_stdout_and_stderr_with_configured_limit() {
+        let _guard = get_test_lock().lock().unwrap();
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -392,6 +404,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_execute_sanitizes_buffered_output_after_sigterm() {
+        let _guard = get_test_lock().lock().unwrap();
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
