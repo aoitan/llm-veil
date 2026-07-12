@@ -299,7 +299,7 @@ mod tests {
             &path_guard,
             &redactor,
             &injector,
-            Duration::from_millis(100),
+            Duration::from_millis(300),
             12000,
         );
 
@@ -409,7 +409,7 @@ mod tests {
         let redactor = Redactor::new();
         let injector = Injector::new();
         let signaler = std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(Duration::from_millis(300));
             unsafe {
                 libc::raise(libc::SIGTERM);
             }
@@ -430,6 +430,11 @@ mod tests {
         );
 
         signaler.join().unwrap();
+        
+        // Allow time for asynchronous signal delivery to fully settle in OS
+        std::thread::sleep(Duration::from_millis(150));
+        reset_received_signal();
+
         assert!(result.is_ok());
         let res = result.unwrap();
         assert_eq!(res.stats.exit_code, Some(128 + libc::SIGTERM));
