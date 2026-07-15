@@ -263,7 +263,10 @@ mod tests {
 
     #[test]
     fn test_execute_simple_command() {
-        let _guard = get_test_lock().lock().unwrap();
+        let _guard = match get_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -287,7 +290,10 @@ mod tests {
 
     #[test]
     fn test_execute_timeout() {
-        let _guard = get_test_lock().lock().unwrap();
+        let _guard = match get_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -311,7 +317,10 @@ mod tests {
 
     #[test]
     fn test_execute_blocked_path() {
-        let _guard = get_test_lock().lock().unwrap();
+        let _guard = match get_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let path_guard = PathGuard::new(vec![".env".to_string()], PathAction::Block).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -337,7 +346,10 @@ mod tests {
 
     #[test]
     fn test_execute_redacts_secret_in_command_metadata() {
-        let _guard = get_test_lock().lock().unwrap();
+        let _guard = match get_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -375,7 +387,10 @@ mod tests {
 
     #[test]
     fn test_execute_truncates_stdout_and_stderr_with_configured_limit() {
-        let _guard = get_test_lock().lock().unwrap();
+        let _guard = match get_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
@@ -404,7 +419,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_execute_sanitizes_buffered_output_after_sigterm() {
-        let _guard = get_test_lock().lock().unwrap();
+        let _guard = match get_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
