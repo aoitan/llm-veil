@@ -12,7 +12,9 @@ mod executor;
 mod injector;
 mod path_guard;
 mod redactor;
+mod safety;
 mod stats;
+mod storage;
 mod truncator;
 mod utils;
 
@@ -20,7 +22,9 @@ use config::PromptInjectionAction;
 use injector::Injector;
 use path_guard::{PathAction, PathGuard};
 use redactor::Redactor;
+use safety::SanitizedStoredContent;
 use stats::Stats;
+use storage::{DeleteStatus, LookupStatus, PersistencePolicy, RunStore, StorageReceipt, Stream};
 
 struct FilteredOutput {
     content: String,
@@ -112,8 +116,16 @@ fn main() {
     let injector = Injector::new();
 
     match cli.command {
-        cli::Commands::Cat { file } => {
-            if let Err(e) = handle_cat(&file, &path_guard, &redactor, &injector, &config) {
+        cli::Commands::Cat { no_store, file } => {
+            let mut persistence = PersistencePolicy::new(no_store);
+            if let Err(e) = handle_cat(
+                &file,
+                &path_guard,
+                &redactor,
+                &injector,
+                &config,
+                &mut persistence,
+            ) {
                 if e.kind() == io::ErrorKind::PermissionDenied
                     && (e.to_string() == CAT_SECRET_BLOCKED_ERROR
                         || e.to_string() == CAT_PROMPT_INJECTION_BLOCKED_ERROR)
@@ -124,8 +136,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        cli::Commands::Grep { pattern, path } => {
+        cli::Commands::Grep {
+            no_store,
+            pattern,
+            path,
+        } => {
             let path_val = path.unwrap_or_else(|| ".".to_string());
+            let mut persistence = PersistencePolicy::new(no_store);
             if let Err(e) = handle_grep(
                 &pattern,
                 &path_val,
@@ -133,6 +150,7 @@ fn main() {
                 &redactor,
                 &injector,
                 &config,
+                &mut persistence,
             ) {
                 eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
                 std::process::exit(1);
@@ -140,8 +158,10 @@ fn main() {
         }
         cli::Commands::Run {
             report_json,
+            no_store,
             command,
         } => {
+            let mut persistence = PersistencePolicy::new(no_store);
             if let Err(e) = handle_run(
                 &command,
                 report_json.as_deref(),
@@ -149,6 +169,7 @@ fn main() {
                 &redactor,
                 &injector,
                 &config,
+                &mut persistence,
             ) {
                 if e.kind() == io::ErrorKind::PermissionDenied
                     && e.to_string() == RUN_PATH_BLOCKED_ERROR
@@ -165,6 +186,44 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        cli::Commands::Retrieve {
+            run_id,
+            stream,
+            start_line,
+            lines,
+        } => {
+            if let Err(e) = handle_retrieve(
+                &run_id, &stream, start_line, lines, &redactor, &injector, &config,
+            ) {
+                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+                std::process::exit(1);
+            }
+        }
+        cli::Commands::Search {
+            run_id,
+            stream,
+            literal,
+            cursor,
+        } => {
+            if let Err(e) = handle_search(
+                &run_id,
+                &stream,
+                &literal,
+                cursor.as_deref(),
+                &redactor,
+                &injector,
+                &config,
+            ) {
+                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+                std::process::exit(1);
+            }
+        }
+        cli::Commands::Store { command } => {
+            if let Err(e) = handle_store(command, &redactor) {
+                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+                std::process::exit(1);
+            }
+        }
     }
 }
 
@@ -174,6 +233,7 @@ fn handle_cat(
     redactor: &Redactor,
     injector: &Injector,
     config: &config::Config,
+    persistence: &mut PersistencePolicy,
 ) -> io::Result<()> {
     // 危険パスのブロック
     if let Some(path_rule) = path_guard.block_rule(file_path) {
@@ -237,8 +297,9 @@ fn handle_cat(
             timestamp: Utc::now().to_rfc3339(),
         };
 
-        stats::save_stats(&stats)?;
         print_stats_to_stderr(&stats);
+        let receipt = persist_stats(persistence, &stats, safety::empty_stored_content(), "cat");
+        print_storage_receipt(&receipt);
 
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -282,8 +343,9 @@ fn handle_cat(
             timestamp: Utc::now().to_rfc3339(),
         };
 
-        stats::save_stats(&stats)?;
         print_stats_to_stderr(&stats);
+        let receipt = persist_stats(persistence, &stats, safety::empty_stored_content(), "cat");
+        print_storage_receipt(&receipt);
 
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -291,11 +353,13 @@ fn handle_cat(
         ));
     }
 
-    // サニタイズの適用
+    // サニタイズの適用。保存用に raw 相当の UTF-8 表現を借用できるよう、
+    // 表示用の分岐で所有権を消費しない。
+    let content_for_store = content.clone();
     let redacted = if path_guard.should_redact(file_path) {
         redactor.redact(&content)
     } else {
-        content
+        content.clone()
     };
 
     let truncated = truncator::truncate(&redacted, config.max_chars);
@@ -338,8 +402,14 @@ fn handle_cat(
         timestamp: Utc::now().to_rfc3339(),
     };
 
-    stats::save_stats(&stats)?;
     print_stats_to_stderr(&stats);
+    let receipt = persist_stats(
+        persistence,
+        &stats,
+        safety::sanitize_for_storage(&content_for_store, "", redactor),
+        "cat",
+    );
+    print_storage_receipt(&receipt);
 
     Ok(())
 }
@@ -351,6 +421,7 @@ fn handle_grep(
     redactor: &Redactor,
     injector: &Injector,
     _config: &config::Config,
+    persistence: &mut PersistencePolicy,
 ) -> io::Result<()> {
     let mut results = Vec::new();
     let mut grep_redactions = 0;
@@ -423,8 +494,14 @@ fn handle_grep(
         timestamp: Utc::now().to_rfc3339(),
     };
 
-    stats::save_stats(&stats)?;
     print_stats_to_stderr(&stats);
+    let receipt = persist_stats(
+        persistence,
+        &stats,
+        safety::sanitize_for_storage(&raw_results, "", redactor),
+        "grep",
+    );
+    print_storage_receipt(&receipt);
 
     Ok(())
 }
@@ -517,6 +594,7 @@ fn handle_run(
     redactor: &Redactor,
     injector: &Injector,
     config: &config::Config,
+    persistence: &mut PersistencePolicy,
 ) -> io::Result<()> {
     for arg in command_args {
         if let Some(path_rule) = path_guard.block_rule(arg) {
@@ -569,11 +647,17 @@ fn handle_run(
     };
     stats.reduction = stats.reduction.max(0.0);
 
-    stats::save_stats(&stats)?;
+    let receipt = persist_stats(
+        persistence,
+        &stats,
+        safety::sanitize_for_storage(&res.stored_stdout, &res.stored_stderr, redactor),
+        "run",
+    );
     if let Some(path) = report_json {
         write_stats_json(path, &stats)?;
     }
     print_stats_to_stderr(&stats);
+    print_storage_receipt(&receipt);
 
     if let Some(code) = res.stats.exit_code {
         std::process::exit(code);
@@ -582,11 +666,244 @@ fn handle_run(
     }
 }
 
+fn persist_stats(
+    persistence: &mut PersistencePolicy,
+    stats: &Stats,
+    content: SanitizedStoredContent,
+    command_kind: &str,
+) -> StorageReceipt {
+    persistence.commit(stats, content, command_kind)
+}
+
+fn print_storage_receipt(receipt: &StorageReceipt) {
+    // A successfully stored run already exposes its run_id through the
+    // existing stats block. Keep the Level 1 contract stable; explicit
+    // no-store and failure receipts must still be visible.
+    if receipt.stored {
+        return;
+    }
+    eprintln!(
+        "[llm-veil storage]\nrun_id: {}\nstored: {}\nretrievable: {}\nstorage_reason: {}",
+        receipt.run_id,
+        receipt.stored,
+        receipt.retrievable,
+        receipt.reason.as_str()
+    );
+    if let Some(expires_at) = receipt.expires_at {
+        eprintln!("expires_at_unix: {}", expires_at);
+    }
+}
+
+fn parse_stream(value: &str) -> io::Result<Stream> {
+    match value {
+        "stdout" => Ok(Stream::Stdout),
+        "stderr" => Ok(Stream::Stderr),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "stream must be stdout or stderr",
+        )),
+    }
+}
+
+fn lookup_status_error(status: LookupStatus, run_id: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("run_id: {}\nstatus: {}", run_id, status.as_str()),
+    )
+}
+
+fn handle_retrieve(
+    run_id: &str,
+    stream_text: &str,
+    start_line: u64,
+    lines: u32,
+    redactor: &Redactor,
+    injector: &Injector,
+    config: &config::Config,
+) -> io::Result<()> {
+    let stream = parse_stream(stream_text)?;
+    let mut store = RunStore::open_default()?;
+    let result = store.retrieve_lines_at(
+        run_id,
+        stream,
+        start_line,
+        lines,
+        redactor,
+        injector,
+        config.prompt_injection_action,
+        config.max_chars,
+        Utc::now().timestamp(),
+    )?;
+    if result.status != LookupStatus::Active {
+        if result.status == LookupStatus::Blocked {
+            print!(
+                "{}",
+                utils::wrap_untrusted_bounded(
+                    &format!(
+                        "status: blocked\nrun_id: {}\nstream: {}\nprompt_injection: true",
+                        result.run_id,
+                        result.stream.as_str()
+                    ),
+                    config.max_chars,
+                )
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "retrieval blocked by prompt-injection policy",
+            ));
+        }
+        return Err(lookup_status_error(result.status, run_id));
+    }
+    if let Some(content) = result.content {
+        print!("{}", content);
+    }
+    Ok(())
+}
+
+fn handle_search(
+    run_id: &str,
+    stream_text: &str,
+    literal: &str,
+    cursor: Option<&str>,
+    redactor: &Redactor,
+    injector: &Injector,
+    config: &config::Config,
+) -> io::Result<()> {
+    let stream = parse_stream(stream_text)?;
+    let mut store = RunStore::open_default()?;
+    let result = store.search_at(run_id, stream, literal, cursor, Utc::now().timestamp())?;
+    if result.status != LookupStatus::Active {
+        return Err(lookup_status_error(result.status, run_id));
+    }
+
+    let mut body = format!(
+        "status: active\nrun_id: {}\nstream: {}\nmatches: {}\n",
+        result.run_id,
+        result.stream.as_str(),
+        result.matches.len()
+    );
+    if result.scan_truncated {
+        body.push_str("scan_truncated: true\n");
+    }
+    if let Some(next_cursor) = &result.next_cursor {
+        body.push_str(&format!("next_cursor: {}\n", next_cursor));
+    }
+    for matched in &result.matches {
+        body.push_str(&format!("line {}: {}\n", matched.line, matched.content));
+    }
+
+    let mut render = safety::render_for_external(
+        &body,
+        redactor,
+        injector,
+        config.prompt_injection_action,
+        config.max_chars,
+    );
+    if !render.blocked && render.injection_warnings > 0 {
+        body = format!(
+            "prompt_injection_warnings: {}\n{}",
+            render.injection_warnings, body
+        );
+        render = safety::render_for_external(
+            &body,
+            redactor,
+            injector,
+            config.prompt_injection_action,
+            config.max_chars,
+        );
+    }
+    if render.blocked {
+        print!(
+            "{}",
+            utils::wrap_untrusted_bounded(
+                &format!(
+                    "status: blocked\nrun_id: {}\nstream: {}\nprompt_injection: true",
+                    run_id,
+                    stream.as_str()
+                ),
+                config.max_chars,
+            )
+        );
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "search blocked by prompt-injection policy",
+        ));
+    }
+    let content = render.content.unwrap_or_default();
+    print!(
+        "{}",
+        utils::wrap_untrusted_bounded(&content, config.max_chars)
+    );
+    Ok(())
+}
+
+fn handle_store(command: cli::StoreCommands, redactor: &Redactor) -> io::Result<()> {
+    let mut store = RunStore::open_default()?;
+    match command {
+        cli::StoreCommands::Delete { run_id } => match store.delete(&run_id)? {
+            DeleteStatus::Deleted => println!("run_id: {}\nstatus: deleted", run_id),
+            DeleteStatus::AlreadyGone => println!("run_id: {}\nstatus: already_gone", run_id),
+            DeleteStatus::NotFound => {
+                return Err(lookup_status_error(LookupStatus::NotFound, &run_id));
+            }
+        },
+        cli::StoreCommands::Purge { expired, all } => {
+            if !expired && !all {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "choose --expired or --all",
+                ));
+            }
+            let removed = store.purge(expired && !all)?;
+            println!("status: purged\nremoved: {}", removed);
+        }
+        cli::StoreCommands::Status => {
+            let status = store.status()?;
+            println!(
+                "root: {}\nactive_records: {}\ntombstones: {}\nttl_seconds: {}\nmax_stream_bytes: {}\nmax_total_bytes: {}\nmax_records: {}",
+                redactor.redact(&status.root.display().to_string()),
+                status.active_records,
+                status.tombstones,
+                status.config.ttl_secs,
+                status.config.max_stream_bytes,
+                status.config.max_total_bytes,
+                status.config.max_records
+            );
+        }
+    }
+    Ok(())
+}
+
 fn handle_report(run_id: Option<&str>) -> io::Result<()> {
-    let stats = if let Some(id) = run_id {
-        stats::load_stats(id)?
-    } else {
-        stats::load_last_stats()?
+    let stats = match RunStore::open_default() {
+        Ok(mut store) => match store.load_stats(run_id) {
+            Ok(stats) => stats,
+            Err(error)
+                if matches!(
+                    error.to_string().as_str(),
+                    "status: expired"
+                        | "status: deleted"
+                        | "status: corrupt"
+                        | "status: storage_error"
+                ) =>
+            {
+                return Err(error);
+            }
+            Err(_) => {
+                if let Some(id) = run_id {
+                    stats::load_stats(id)?
+                } else {
+                    stats::load_last_stats()?
+                }
+            }
+        },
+        Err(_) => {
+            if let Some(id) = run_id {
+                stats::load_stats(id)?
+            } else {
+                stats::load_last_stats()?
+            }
+        }
     };
     let redactor = Redactor::new();
     let output = format_report_output(&stats, &redactor);
@@ -709,6 +1026,7 @@ mod tests {
             max_chars: 1000,
             blocked_patterns: vec![],
         };
+        let mut persistence = PersistencePolicy::new(true);
 
         let res = handle_cat(
             file_path.to_str().unwrap(),
@@ -716,6 +1034,7 @@ mod tests {
             &redactor,
             &injector,
             &config,
+            &mut persistence,
         );
         fs::remove_file(&file_path).unwrap();
 
