@@ -1,0 +1,24 @@
+FROM rust:1.85-bookworm
+
+ENV CARGO_TERM_COLOR=always \
+    RUST_BACKTRACE=1
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends --yes \
+        build-essential \
+        ca-certificates \
+        python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup component add rustfmt
+
+WORKDIR /workspace
+
+# Keep dependency downloads in an image layer so test runs only rebuild the
+# project when the checkout changes.
+COPY Cargo.toml Cargo.lock ./
+RUN cargo fetch --locked
+
+COPY . .
+
+CMD ["bash", "scripts/test_level2.sh"]
