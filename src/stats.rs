@@ -23,8 +23,6 @@ fn get_stats_dir() -> std::path::PathBuf {
 }
 
 pub fn save_stats(stats: &Stats) -> Result<(), io::Error> {
-    uuid::Uuid::parse_str(&stats.run_id)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid run id"))?;
     let dir = get_stats_dir();
     fs::create_dir_all(&dir)?;
 
@@ -52,8 +50,6 @@ pub fn sanitized_stats_json(stats: &Stats) -> Result<String, io::Error> {
 }
 
 pub fn load_stats(run_id: &str) -> Result<Stats, io::Error> {
-    uuid::Uuid::parse_str(run_id)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid run id"))?;
     let dir = get_stats_dir();
     let file_path = dir.join(format!("{}.json", run_id));
 

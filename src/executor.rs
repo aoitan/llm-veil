@@ -78,9 +78,6 @@ fn terminate_child(child: &mut std::process::Child) -> io::Result<()> {
 pub struct ExecutionResult {
     pub stdout: String,
     pub stderr: String,
-    /// Redacted, truncate-before output used by the retention layer.
-    pub stored_stdout: String,
-    pub stored_stderr: String,
     pub stats: Stats,
 }
 
@@ -210,8 +207,6 @@ pub fn execute_command(
     Ok(ExecutionResult {
         stdout: final_stdout,
         stderr: final_stderr,
-        stored_stdout: redacted_stdout,
-        stored_stderr: redacted_stderr,
         stats,
     })
 }
@@ -316,11 +311,7 @@ mod tests {
 
         assert!(result.is_ok());
         let res = result.unwrap();
-        assert!(
-            res.stats.timeout,
-            "Expected timeout to be true, but got res={:?}",
-            res
-        );
+        assert!(res.stats.timeout, "Expected timeout to be true, but got res={:?}", res);
         assert_eq!(res.stats.exit_code, Some(124));
     }
 
@@ -457,7 +448,7 @@ mod tests {
         );
 
         signaler.join().unwrap();
-
+        
         // Allow time for asynchronous signal delivery to fully settle in OS
         std::thread::sleep(Duration::from_millis(150));
         reset_received_signal();
