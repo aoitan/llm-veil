@@ -981,6 +981,7 @@ pub fn default_root() -> io::Result<PathBuf> {
                 // first component and permanently deny storage to this user,
                 // even though the ownership checks correctly prevent reads.
                 data_home = PathBuf::from("/tmp")
+                    .canonicalize()?
                     .join(format!("llm-veil-data-{}", unsafe { libc::geteuid() }));
                 if data_home.starts_with(&workspace) {
                     return Err(io::Error::new(
@@ -1599,7 +1600,11 @@ fn safe_storage_parent(path: &Path, metadata: &fs::Metadata) -> bool {
     // The fallback root used when HOME is inside the checkout is /tmp. It is
     // accepted only as the standard root-owned sticky directory; every
     // application-created descendant must still be 0700 and user-owned.
-    if path == Path::new("/tmp") && metadata.uid() == 0 && mode & 0o1777 == 0o1777 {
+    let canonical_system_temp = Path::new("/tmp").canonicalize().ok();
+    if canonical_system_temp.as_deref() == Some(path)
+        && metadata.uid() == 0
+        && mode & 0o1777 == 0o1777
+    {
         return true;
     }
 
@@ -1684,7 +1689,22 @@ mod tests {
     use crate::safety;
 
     fn temp_root() -> PathBuf {
-        std::env::temp_dir().join(format!("llm-veil-storage-{}", Uuid::new_v4()))
+        // macOS exposes the temporary directory through `/var`, which is a
+        // symlink to `/private/var`. Resolve the existing parent before
+        // creating the private test root so the storage safety check sees
+        // the actual path components.
+        std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("llm-veil-storage-{}", Uuid::new_v4()))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_system_temp_parent_is_safe() {
+        let path = PathBuf::from("/tmp").canonicalize().unwrap();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(safe_storage_parent(&path, &metadata));
     }
 
     fn stats(run_id: Uuid) -> Stats {
