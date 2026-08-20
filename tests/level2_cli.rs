@@ -13,9 +13,26 @@ fn cli_lock() -> &'static Mutex<()> {
 }
 
 fn temp_data_home(prefix: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("{prefix}-{}", Uuid::new_v4()));
+    let path = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonicalize temporary directory")
+        .join(format!("{prefix}-{}", Uuid::new_v4()));
     fs::create_dir(&path).expect("create isolated data home");
     path
+}
+
+#[cfg(target_os = "macos")]
+fn storage_root(_data_home: &PathBuf, home: &PathBuf) -> PathBuf {
+    home.join("Library")
+        .join("Application Support")
+        .join("llm-veil")
+        .join("store")
+        .join("v1")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn storage_root(data_home: &PathBuf, _home: &PathBuf) -> PathBuf {
+    data_home.join("llm-veil").join("store").join("v1")
 }
 
 fn veil(data_home: &PathBuf, home: &PathBuf) -> Command {
@@ -55,10 +72,7 @@ fn default_storage_retrieval_delete_and_no_store_are_observable() {
     assert!(!initial_stdout.contains("known-secret"));
 
     let run_id = run_id_from(&run.stderr);
-    let record_dir = data_home
-        .join("llm-veil")
-        .join("store")
-        .join("v1")
+    let record_dir = storage_root(&data_home, &home)
         .join("records")
         .join(&run_id);
     assert!(record_dir.join("manifest.json").is_file());
@@ -126,7 +140,7 @@ fn default_storage_retrieval_delete_and_no_store_are_observable() {
         .expect("run no-store veil");
     assert!(no_store.status.success(), "no-store failed: {:?}", no_store);
     assert!(String::from_utf8_lossy(&no_store.stderr).contains("storage_reason: no_store"));
-    assert!(!no_store_home.join("llm-veil").exists());
+    assert!(!storage_root(&no_store_home, &no_store_home_config).exists());
 
     fs::remove_dir_all(data_home).expect("remove CLI test data");
     fs::remove_dir_all(home).expect("remove CLI test home");
