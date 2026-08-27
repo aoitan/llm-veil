@@ -50,8 +50,12 @@ const CAT_SECRET_BLOCKED_ERROR: &str = "File contains secret patterns and was bl
 const CAT_PROMPT_INJECTION_BLOCKED_ERROR: &str =
     "File contains prompt-injection patterns and was blocked";
 const RUN_PATH_BLOCKED_ERROR: &str = "Command arguments contain a blocked path";
+const RUN_PROMPT_INJECTION_BLOCKED_ERROR: &str =
+    "Command output contains prompt-injection patterns and was blocked";
 const WORKSPACE_BOUNDARY_RULE: &str = "workspace_boundary";
 const GREP_PARTIAL_ERROR: &str = "grep traversal was incomplete; results may be partial";
+const GREP_PROMPT_INJECTION_BLOCKED_ERROR: &str =
+    "grep output contains prompt-injection patterns and was blocked";
 
 fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
     let redacted = redactor.redact(content);
@@ -177,6 +181,11 @@ fn main() {
                 &mut output,
                 &mut persistence,
             ) {
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && e.to_string() == GREP_PROMPT_INJECTION_BLOCKED_ERROR
+                {
+                    std::process::exit(1);
+                }
                 emit_error(&mut output, &e.to_string());
                 let exit_code = if e.to_string() == GREP_PARTIAL_ERROR {
                     2
@@ -205,7 +214,8 @@ fn main() {
                 &mut persistence,
             ) {
                 if e.kind() == io::ErrorKind::PermissionDenied
-                    && e.to_string() == RUN_PATH_BLOCKED_ERROR
+                    && (e.to_string() == RUN_PATH_BLOCKED_ERROR
+                        || e.to_string() == RUN_PROMPT_INJECTION_BLOCKED_ERROR)
                 {
                     std::process::exit(1);
                 }
@@ -491,7 +501,7 @@ fn handle_grep(
     path_guard: &PathGuard,
     redactor: &Redactor,
     injector: &Injector,
-    _config: &config::Config,
+    config: &config::Config,
     environment: &dyn EnvironmentAdapter,
     output: &mut OutputRouter<'_>,
     persistence: &mut Persistence,
@@ -527,9 +537,16 @@ fn handle_grep(
 
     let rendered = output.emit_stdout_prepared(
         &filtered.content,
-        PromptInjectionAction::Warn,
+        config.prompt_injection_action,
         truncated_flag,
     )?;
+
+    if rendered.is_blocked() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            GREP_PROMPT_INJECTION_BLOCKED_ERROR,
+        ));
+    }
 
     // stats記録
     let returned_bytes = rendered.content().map_or(0, str::len);
@@ -671,14 +688,21 @@ fn handle_run(
 
     let stdout_render = output.emit_stdout_prepared(
         &res.stdout,
-        PromptInjectionAction::Warn,
+        config.prompt_injection_action,
         res.stats.truncated,
     )?;
     let stderr_render = output.emit_stderr_prepared(
         &res.stderr,
-        PromptInjectionAction::Warn,
+        config.prompt_injection_action,
         res.stats.truncated,
     )?;
+
+    if stdout_render.is_blocked() || stderr_render.is_blocked() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            RUN_PROMPT_INJECTION_BLOCKED_ERROR,
+        ));
+    }
 
     // インジェクション警告の検出確認
     if res.stats.prompt_injection_warnings > 0 {
