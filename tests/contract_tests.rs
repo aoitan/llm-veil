@@ -1,10 +1,18 @@
-use std::process::Command;
+#![deny(unfulfilled_lint_expectations)]
+
 use std::sync::Mutex;
 
 static CONTRACT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "WB-15-012: integration harness launches the strict contract verifier"
+)]
 fn safety_gate_contract_verification_passes() {
+    use std::process::Command;
+
     let _guard = CONTRACT_TEST_LOCK
         .lock()
         .expect("contract test lock poisoned");
@@ -28,7 +36,14 @@ fn safety_gate_contract_verification_passes() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "WB-15-013: integration harness launches the metadata verifier"
+)]
 fn safety_gate_meta_verification_rejects_corrupted_snapshot() {
+    use std::process::Command;
+
     let _guard = CONTRACT_TEST_LOCK
         .lock()
         .expect("contract test lock poisoned");

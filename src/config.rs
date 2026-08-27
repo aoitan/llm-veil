@@ -1,4 +1,5 @@
 use crate::path_guard::PathAction;
+use crate::platform::EnvironmentAdapter;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -51,21 +52,18 @@ impl Default for Config {
     }
 }
 
-fn get_config_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME")
-        .ok()
-        .or_else(|| std::env::var("USERPROFILE").ok())?;
-    Some(
-        PathBuf::from(home)
-            .join(".config")
-            .join("llm-veil")
-            .join("config.json"),
-    )
+fn get_config_path(environment: &dyn EnvironmentAdapter) -> Option<PathBuf> {
+    let home = environment.home_dir()?;
+    Some(home.join(".config").join("llm-veil").join("config.json"))
 }
 
-pub fn load_config() -> Config {
+#[expect(
+    clippy::disallowed_methods,
+    reason = "DL-003: configuration-file I/O is outside the workspace path adapter"
+)]
+pub(crate) fn load_config(environment: &dyn EnvironmentAdapter) -> Config {
     let mut config = Config::default();
-    if let Some(path) = get_config_path() {
+    if let Some(path) = get_config_path(environment) {
         if path.exists() {
             if let Ok(content) = fs::read_to_string(path) {
                 if let Ok(parsed) = serde_json::from_str::<Config>(&content) {
@@ -80,6 +78,7 @@ pub fn load_config() -> Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::TestEnvironment;
 
     #[test]
     fn test_default_config() {
@@ -105,5 +104,33 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.prompt_injection_action, PromptInjectionAction::Warn);
+    }
+
+    #[test]
+    fn load_config_uses_injected_home_directory() {
+        let home = std::env::temp_dir().join(format!("llm-veil-config-{}", uuid::Uuid::new_v4()));
+        let config_path = home.join(".config").join("llm-veil").join("config.json");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            r#"{
+                "blocked_patterns": [],
+                "action": "Allow",
+                "prompt_injection_action": "Warn",
+                "timeout_seconds": 7,
+                "max_chars": 321
+            }"#,
+        )
+        .unwrap();
+        let environment = TestEnvironment::new("/fixture/current")
+            .with_value("HOME", home.as_os_str().to_os_string());
+
+        let config = load_config(&environment);
+
+        assert_eq!(config.action, PathAction::Allow);
+        assert_eq!(config.prompt_injection_action, PromptInjectionAction::Warn);
+        assert_eq!(config.timeout_seconds, 7);
+        assert_eq!(config.max_chars, 321);
+        fs::remove_dir_all(home).unwrap();
     }
 }

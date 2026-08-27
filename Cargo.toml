@@ -2,6 +2,9 @@
 name = "llm-veil"
 version = "0.1.0"
 edition = "2024"
+# This binary is not published; cargo-deny uses this metadata for private
+# package license handling.
+publish = false
 
 [[bin]]
 name = "veil"

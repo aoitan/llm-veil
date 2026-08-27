@@ -1,0 +1,102 @@
+name: Design lint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: design-lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  design-lint:
+    name: design-lint / full
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.88.0 --profile minimal \
+            --component rustfmt --component clippy
+          rustup show active-toolchain
+
+      - name: Install required cargo tools from the version manifest
+        run: |
+          set -euo pipefail
+          cargo_bin_dir="$(dirname "$(command -v cargo)")"
+          export PATH="${cargo_bin_dir}:${PATH}"
+          echo "${cargo_bin_dir}" >> "${GITHUB_PATH}"
+
+          while IFS=$'\t' read -r binary version; do
+            [[ -n "${binary}" ]] || continue
+            echo "::group::Install ${binary} ${version}"
+            cargo install --locked --version "${version}" "${binary}"
+            echo "::endgroup::"
+          done < <(
+            jq -r '.tools[] | select(.required == true) | [.binary, .version] | @tsv' \
+              design-lint-tools.json
+          )
+
+      - name: Run the shared full design-lint entrypoint
+        run: bash scripts/design_lint.sh full
+
+  dependency-advisories:
+    name: dependency advisories (PR report-only, schedule blocking)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.88.0 --profile minimal --component rustfmt
+          rustup show active-toolchain
+
+      - name: Install cargo-deny from the version manifest
+        run: |
+          set -euo pipefail
+          cargo_bin_dir="$(dirname "$(command -v cargo)")"
+          export PATH="${cargo_bin_dir}:${PATH}"
+          echo "${cargo_bin_dir}" >> "${GITHUB_PATH}"
+          cargo_deny_version="$(jq -r '.tools[] | select(.binary == "cargo-deny") | .version' design-lint-tools.json)"
+          test -n "${cargo_deny_version}" && test "${cargo_deny_version}" != "null"
+          cargo install --locked --version "${cargo_deny_version}" cargo-deny
+
+      - name: Run the shared advisory design-lint entrypoint
+        # RustSec DB changes must not make an unchanged PR unmergeable. Keep
+        # setup failures blocking; only the advisory result is report-only on
+        # pull requests. The same profile is blocking for schedules, pushes,
+        # and manual runs.
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
+        run: |
+          set -o pipefail
+          advisory_dir="${RUNNER_TEMP}/llm-veil-design-lint"
+          mkdir -p "${advisory_dir}"
+          bash scripts/design_lint.sh advisory 2>&1 | \
+            tee "${advisory_dir}/cargo-deny-advisories.log"
+
+      - name: Upload advisory report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-deny-advisories-${{ github.run_id }}
+          path: ${{ runner.temp }}/llm-veil-design-lint/cargo-deny-advisories.log
+          if-no-files-found: error

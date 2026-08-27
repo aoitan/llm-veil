@@ -1,0 +1,46 @@
+# Dependency policy for cargo-deny 0.20.2.
+# The allowlists below were derived from the current Cargo.lock graph on
+# 2026-08-26. New licenses or non-crates.io sources must be reviewed rather
+# than silently accepted.
+
+[graph]
+all-features = true
+# The initial support matrix is Unix/Linux. Keeping the target set explicit
+# makes license/source results reproducible instead of including host-specific
+# Windows or macOS target dependencies.
+targets = ["aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/RustSec/advisory-db"]
+ignore = []
+
+[bans]
+# Duplicate versions are reported while the graph is still being migrated.
+# Wildcard requirements are a deterministic blocking policy.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+]
+exceptions = []
+
+[licenses.private]
+# llm-veil is a binary application and is not published as a crate.
+ignore = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

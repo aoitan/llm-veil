@@ -18,7 +18,20 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-VEIL = REPO_ROOT / "target" / "debug" / "veil"
+
+
+def cargo_target_dir() -> Path:
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    if not configured:
+        return REPO_ROOT / "target"
+
+    target_dir = Path(configured)
+    if target_dir.is_absolute():
+        return target_dir
+    return REPO_ROOT / target_dir
+
+
+VEIL = cargo_target_dir() / "debug" / "veil"
 DEFAULT_SNAPSHOT = REPO_ROOT / "tests" / "fixtures" / "contract_observations.json"
 COVERAGE_MATRIX_PATH = REPO_ROOT / "doc" / "contract_coverage_matrix.json"
 CONTRACT_WORKSPACE_PARENT = REPO_ROOT / ".contract-workspaces"
@@ -530,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
         tempfile.mkdtemp(prefix="llm-veil-contract-", dir=CONTRACT_WORKSPACE_PARENT)
     )
     outside_root = Path(tempfile.mkdtemp(prefix="llm-veil-outside-workspace-"))
+    storage_home = Path(tempfile.mkdtemp(prefix="llm-veil-contract-data-"))
     try:
         paths = write_fixture(tmp_root)
         outside_workspace_file = outside_root / "outside.txt"
@@ -545,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
             "TMPDIR": str(run_tmp),
             "TEMP": str(temp),
             "TMP": str(temp),
+            "XDG_DATA_HOME": str(storage_home),
             "TOKEN": "env_token_13579",
             "LLM_VEIL_WORKSPACE_ROOT": str(REPO_ROOT),
             "LLM_VEIL_CONTRACT_CWD": str(tmp_root),
@@ -1055,6 +1070,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
         shutil.rmtree(outside_root, ignore_errors=True)
+        shutil.rmtree(storage_home, ignore_errors=True)
         try:
             CONTRACT_WORKSPACE_PARENT.rmdir()
         except OSError:

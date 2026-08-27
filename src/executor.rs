@@ -1,78 +1,20 @@
 use crate::injector::Injector;
 use crate::path_guard::PathGuard;
+use crate::platform::{
+    CommandRequest, EnvironmentAdapter, ProcessAdapter, install_shutdown_signal_handlers,
+    received_signal, reset_received_signal, terminate_child,
+};
+#[cfg(test)]
+use crate::platform::{SystemEnvironment, SystemProcessAdapter};
 use crate::redactor::Redactor;
 use crate::stats::Stats;
 use crate::truncator::truncate;
 use chrono::Utc;
 use std::ffi::OsString;
 use std::io::{self, Read};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use wait_timeout::ChildExt;
-
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
-#[cfg(unix)]
-static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
-
-#[cfg(unix)]
-extern "C" fn record_shutdown_signal(signal: libc::c_int) {
-    RECEIVED_SIGNAL.store(signal, Ordering::SeqCst);
-}
-
-#[cfg(unix)]
-fn install_shutdown_signal_handlers() {
-    unsafe {
-        libc::signal(
-            libc::SIGINT,
-            record_shutdown_signal as *const () as libc::sighandler_t,
-        );
-        libc::signal(
-            libc::SIGTERM,
-            record_shutdown_signal as *const () as libc::sighandler_t,
-        );
-    }
-}
-
-#[cfg(unix)]
-fn reset_received_signal() {
-    RECEIVED_SIGNAL.store(0, Ordering::SeqCst);
-}
-
-#[cfg(unix)]
-fn received_signal() -> Option<i32> {
-    let signal = RECEIVED_SIGNAL.load(Ordering::SeqCst);
-    (signal > 0).then_some(signal)
-}
-
-#[cfg(not(unix))]
-fn install_shutdown_signal_handlers() {}
-
-#[cfg(not(unix))]
-fn reset_received_signal() {}
-
-#[cfg(not(unix))]
-fn received_signal() -> Option<i32> {
-    None
-}
-
-#[cfg(unix)]
-fn terminate_child(child: &mut std::process::Child) -> io::Result<()> {
-    let pgid = child.id() as libc::pid_t;
-    let kill_result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
-    if kill_result == -1 {
-        child.kill()?;
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn terminate_child(child: &mut std::process::Child) -> io::Result<()> {
-    child.kill()
-}
 
 #[derive(Debug)]
 pub struct ExecutionResult {
@@ -84,6 +26,7 @@ pub struct ExecutionResult {
     pub stats: Stats,
 }
 
+#[cfg(test)]
 pub fn execute_command(
     command_args: &[String],
     path_guard: &PathGuard,
@@ -91,6 +34,34 @@ pub fn execute_command(
     injector: &Injector,
     timeout_duration: Duration,
     max_chars: usize,
+) -> Result<ExecutionResult, io::Error> {
+    let environment = SystemEnvironment;
+    let process = SystemProcessAdapter;
+    execute_command_with_adapters(
+        command_args,
+        path_guard,
+        redactor,
+        injector,
+        timeout_duration,
+        max_chars,
+        &environment,
+        &process,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WB-15-006: preserve the adapter seam until the application context refactor"
+)]
+pub(crate) fn execute_command_with_adapters(
+    command_args: &[String],
+    path_guard: &PathGuard,
+    redactor: &Redactor,
+    injector: &Injector,
+    timeout_duration: Duration,
+    max_chars: usize,
+    environment: &dyn EnvironmentAdapter,
+    process: &dyn ProcessAdapter,
 ) -> Result<ExecutionResult, io::Error> {
     reset_received_signal();
     install_shutdown_signal_handlers();
@@ -112,16 +83,9 @@ pub fn execute_command(
         }
     }
 
-    let mut cmd = Command::new(&command_args[0]);
-    cmd.args(&command_args[1..]);
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    #[cfg(unix)]
-    cmd.process_group(0);
-    let (sanitized_env, env_redactions) = sanitized_environment(redactor);
-    cmd.envs(sanitized_env);
-
-    let mut child = cmd.spawn()?;
+    let (sanitized_env, env_redactions) = sanitized_environment(environment, redactor);
+    let request = CommandRequest::new(command_args, sanitized_env)?;
+    let mut child = process.spawn(&request)?;
 
     let mut timeout = false;
     let mut stdout_bytes = Vec::new();
@@ -144,13 +108,10 @@ pub fn execute_command(
         }
 
         let wait_for = (deadline - now).min(Duration::from_millis(50));
-        match child.wait_timeout(wait_for)? {
-            Some(status) => {
-                break status
-                    .code()
-                    .or_else(|| received_signal().map(|signal| 128 + signal));
-            }
-            None => {}
+        if let Some(status) = child.wait_timeout(wait_for)? {
+            break status
+                .code()
+                .or_else(|| received_signal().map(|signal| 128 + signal));
         }
     };
 
@@ -216,9 +177,14 @@ pub fn execute_command(
     })
 }
 
-fn sanitized_environment(redactor: &Redactor) -> (Vec<(OsString, OsString)>, usize) {
+fn sanitized_environment(
+    environment: &dyn EnvironmentAdapter,
+    redactor: &Redactor,
+) -> (Vec<(OsString, OsString)>, usize) {
     let mut redactions = 0;
-    let env = std::env::vars_os()
+    let env = environment
+        .variables()
+        .into_iter()
         .map(|(key, value)| {
             if let (Some(key_str), Some(value_str)) = (key.to_str(), value.to_str()) {
                 let (sanitized_value, value_redactions) =
@@ -318,8 +284,7 @@ mod tests {
         let res = result.unwrap();
         assert!(
             res.stats.timeout,
-            "Expected timeout to be true, but got res={:?}",
-            res
+            "Expected timeout to be true, but got res={res:?}"
         );
         assert_eq!(res.stats.exit_code, Some(124));
     }
@@ -394,6 +359,40 @@ mod tests {
         assert_eq!(redactions, 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_execute_command_uses_injected_environment() {
+        let _guard = match get_test_lock().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let environment = crate::platform::TestEnvironment::new("/fixture")
+            .with_value("LLM_VEIL_TEST_VALUE", "from-fixture");
+        let process = SystemProcessAdapter;
+        let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
+        let redactor = Redactor::new();
+        let injector = Injector::new();
+        let args = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf '%s' \"$LLM_VEIL_TEST_VALUE\"".to_string(),
+        ];
+
+        let result = execute_command_with_adapters(
+            &args,
+            &path_guard,
+            &redactor,
+            &injector,
+            Duration::from_secs(5),
+            12000,
+            &environment,
+            &process,
+        )
+        .unwrap();
+
+        assert_eq!(result.stdout, "from-fixture");
+    }
+
     #[test]
     fn test_execute_truncates_stdout_and_stderr_with_configured_limit() {
         let _guard = match get_test_lock().lock() {
@@ -437,9 +436,7 @@ mod tests {
         let injector = Injector::new();
         let signaler = std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(300));
-            unsafe {
-                libc::raise(libc::SIGTERM);
-            }
+            crate::platform::raise_signal_for_test(libc::SIGTERM);
         });
 
         let args = vec![

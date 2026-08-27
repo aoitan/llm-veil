@@ -1,0 +1,24 @@
+disallowed-methods = [
+    "std::process::Command::new",
+    "std::env::var",
+    "std::env::var_os",
+    "std::env::vars",
+    "std::env::vars_os",
+    "std::env::current_dir",
+    "std::fs::canonicalize",
+    "std::path::Path::canonicalize",
+    "std::fs::read",
+    "std::fs::read_to_string",
+    "std::fs::read_dir",
+    "std::fs::File::open",
+    "std::fs::OpenOptions::open",
+]
+disallowed-macros = [
+    "std::print",
+    "std::println",
+    "std::eprint",
+    "std::eprintln",
+]
+disallowed-types = [
+    "std::process::Command",
+]

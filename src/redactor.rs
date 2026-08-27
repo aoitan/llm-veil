@@ -1,3 +1,4 @@
+use crate::platform::{EnvironmentAdapter, SystemEnvironment};
 use regex::{Regex, RegexSet};
 
 pub struct Redactor {
@@ -8,10 +9,15 @@ pub struct Redactor {
 
 impl Redactor {
     pub fn new() -> Self {
+        let environment = SystemEnvironment;
+        Self::new_with_environment(&environment)
+    }
+
+    pub(crate) fn new_with_environment(environment: &dyn EnvironmentAdapter) -> Self {
         Self::with_path_prefixes(
             ["HOME", "TMPDIR", "TEMP", "TMP"]
                 .into_iter()
-                .filter_map(|name| std::env::var_os(name))
+                .filter_map(|name| environment.value(name))
                 .filter_map(|value| value.into_string().ok()),
         )
     }
@@ -335,7 +341,7 @@ mod tests {
         let output = redactor.redact(&input);
 
         assert!(output.contains("[REDACTED_PATH]/workspace/project"));
-        assert!(!output.contains(&home));
+        assert!(!output.contains(home));
     }
 
     #[test]

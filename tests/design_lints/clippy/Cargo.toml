@@ -1,0 +1,4 @@
+[package]
+name = "design-lint-clippy-fixtures"
+version = "0.1.0"
+edition = "2024"

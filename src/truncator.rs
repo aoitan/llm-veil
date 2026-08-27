@@ -18,10 +18,7 @@ pub fn truncate(content: &str, max_chars: usize) -> String {
     let omitted: String = chars[prefix_len..total_chars - suffix_len].iter().collect();
     let omitted_bytes = omitted.len();
 
-    format!(
-        "{}\n... [TRUNCATED: omitted {} bytes] ...\n{}",
-        prefix, omitted_bytes, suffix
-    )
+    format!("{prefix}\n... [TRUNCATED: omitted {omitted_bytes} bytes] ...\n{suffix}")
 }
 
 #[cfg(test)]

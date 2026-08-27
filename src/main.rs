@@ -1,8 +1,15 @@
+#![deny(unsafe_code)]
+#![deny(unfulfilled_lint_expectations)]
+#![warn(unreachable_pub)]
+#![warn(clippy::unwrap_used)]
+#![warn(clippy::expect_used)]
+#![warn(clippy::too_many_arguments)]
+
 use chrono::Utc;
 use clap::Parser;
 use std::fs;
-use std::io::{self, BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::Path;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -10,7 +17,11 @@ mod cli;
 mod config;
 mod executor;
 mod injector;
+mod output;
 mod path_guard;
+mod path_io;
+mod persistence;
+mod platform;
 mod redactor;
 mod safety;
 mod stats;
@@ -20,11 +31,15 @@ mod utils;
 
 use config::PromptInjectionAction;
 use injector::Injector;
+use output::{OutputRouter, StdOutputAdapter};
 use path_guard::{PathAction, PathGuard};
+use path_io::{GrepOutcome, PathBoundaryError, PathIo, TraversalCompleteness, WorkspaceResolver};
+use persistence::Persistence;
+use platform::{EnvironmentAdapter, ProcessAdapter, SystemEnvironment, SystemProcessAdapter};
 use redactor::Redactor;
 use safety::SanitizedStoredContent;
 use stats::Stats;
-use storage::{DeleteStatus, LookupStatus, PersistencePolicy, RunStore, StorageReceipt, Stream};
+use storage::{DeleteStatus, LookupStatus, RunStore, StorageReceipt, Stream};
 
 struct FilteredOutput {
     content: String,
@@ -35,7 +50,12 @@ const CAT_SECRET_BLOCKED_ERROR: &str = "File contains secret patterns and was bl
 const CAT_PROMPT_INJECTION_BLOCKED_ERROR: &str =
     "File contains prompt-injection patterns and was blocked";
 const RUN_PATH_BLOCKED_ERROR: &str = "Command arguments contain a blocked path";
+const RUN_PROMPT_INJECTION_BLOCKED_ERROR: &str =
+    "Command output contains prompt-injection patterns and was blocked";
 const WORKSPACE_BOUNDARY_RULE: &str = "workspace_boundary";
+const GREP_PARTIAL_ERROR: &str = "grep traversal was incomplete; results may be partial";
+const GREP_PROMPT_INJECTION_BLOCKED_ERROR: &str =
+    "grep output contains prompt-injection patterns and was blocked";
 
 fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
     let redacted = redactor.redact(content);
@@ -49,11 +69,11 @@ fn final_output_filter(content: &str, redactor: &Redactor) -> FilteredOutput {
 
 fn blocked_cat_output(reason: &str, path_rule: &str, redactions: usize) -> String {
     format!(
-        "blocked: true\nreason: {}\npath_rule: {}\nredactions: {}\nexit_code: 1",
-        reason, path_rule, redactions
+        "blocked: true\nreason: {reason}\npath_rule: {path_rule}\nredactions: {redactions}\nexit_code: 1"
     )
 }
 
+#[cfg(test)]
 fn sanitized_blocked_cat_output(
     reason: &str,
     path_rule: &str,
@@ -64,23 +84,23 @@ fn sanitized_blocked_cat_output(
     final_output_filter(&status, redactor).content
 }
 
+#[cfg(test)]
 fn format_error_for_stderr(message: &str, redactor: &Redactor) -> String {
-    final_output_filter(&format!("Error: {}", message), redactor).content
+    final_output_filter(&format!("Error: {message}"), redactor).content
 }
 
-fn is_inside_workspace(file_path: &str) -> io::Result<bool> {
-    let workspace = std::env::var_os("LLM_VEIL_WORKSPACE_ROOT")
-        .filter(|root| !root.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or(std::env::current_dir()?)
-        .canonicalize()?;
-    let target = PathBuf::from(file_path).canonicalize()?;
-
-    Ok(target.starts_with(workspace))
+fn emit_error(output: &mut OutputRouter<'_>, message: &str) {
+    let _ = output.emit_stderr_prepared(
+        &format!("Error: {message}"),
+        PromptInjectionAction::Warn,
+        false,
+    );
 }
 
 fn main() {
-    let mut config = config::load_config();
+    let environment = SystemEnvironment;
+    let process = SystemProcessAdapter;
+    let mut config = config::load_config(&environment);
     let cli = cli::Cli::parse();
 
     // コマンドライン引数による上書き
@@ -99,31 +119,38 @@ fn main() {
         config.max_chars = max_chars;
     }
 
-    let redactor = Redactor::new();
+    let redactor = Redactor::new_with_environment(&environment);
+    let injector = Injector::new();
+    let mut std_output = StdOutputAdapter;
+    let mut output = OutputRouter::new(
+        &mut std_output,
+        &redactor,
+        &injector,
+        config.prompt_injection_action,
+        config.max_chars,
+    );
     let path_guard = match PathGuard::new(config.blocked_patterns.clone(), config.action) {
         Ok(pg) => pg,
         Err(e) => {
-            eprintln!(
-                "{}",
-                format_error_for_stderr(
-                    &format!("Invalid pattern in configuration: {}", e),
-                    &redactor,
-                )
+            emit_error(
+                &mut output,
+                &format!("Invalid pattern in configuration: {e}"),
             );
             std::process::exit(1);
         }
     };
-    let injector = Injector::new();
 
     match cli.command {
         cli::Commands::Cat { no_store, file } => {
-            let mut persistence = PersistencePolicy::new(no_store);
+            let mut persistence = Persistence::new_with_environment(no_store, &environment);
             if let Err(e) = handle_cat(
                 &file,
                 &path_guard,
                 &redactor,
                 &injector,
                 &config,
+                &environment,
+                &mut output,
                 &mut persistence,
             ) {
                 if e.kind() == io::ErrorKind::PermissionDenied
@@ -132,7 +159,7 @@ fn main() {
                 {
                     std::process::exit(1);
                 }
-                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+                emit_error(&mut output, &e.to_string());
                 std::process::exit(1);
             }
         }
@@ -142,7 +169,7 @@ fn main() {
             path,
         } => {
             let path_val = path.unwrap_or_else(|| ".".to_string());
-            let mut persistence = PersistencePolicy::new(no_store);
+            let mut persistence = Persistence::new_with_environment(no_store, &environment);
             if let Err(e) = handle_grep(
                 &pattern,
                 &path_val,
@@ -150,10 +177,22 @@ fn main() {
                 &redactor,
                 &injector,
                 &config,
+                &environment,
+                &mut output,
                 &mut persistence,
             ) {
-                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
-                std::process::exit(1);
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && e.to_string() == GREP_PROMPT_INJECTION_BLOCKED_ERROR
+                {
+                    std::process::exit(1);
+                }
+                emit_error(&mut output, &e.to_string());
+                let exit_code = if e.to_string() == GREP_PARTIAL_ERROR {
+                    2
+                } else {
+                    1
+                };
+                std::process::exit(exit_code);
             }
         }
         cli::Commands::Run {
@@ -161,7 +200,7 @@ fn main() {
             no_store,
             command,
         } => {
-            let mut persistence = PersistencePolicy::new(no_store);
+            let mut persistence = Persistence::new_with_environment(no_store, &environment);
             if let Err(e) = handle_run(
                 &command,
                 report_json.as_deref(),
@@ -169,20 +208,24 @@ fn main() {
                 &redactor,
                 &injector,
                 &config,
+                &environment,
+                &process,
+                &mut output,
                 &mut persistence,
             ) {
                 if e.kind() == io::ErrorKind::PermissionDenied
-                    && e.to_string() == RUN_PATH_BLOCKED_ERROR
+                    && (e.to_string() == RUN_PATH_BLOCKED_ERROR
+                        || e.to_string() == RUN_PROMPT_INJECTION_BLOCKED_ERROR)
                 {
                     std::process::exit(1);
                 }
-                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+                emit_error(&mut output, &e.to_string());
                 std::process::exit(1);
             }
         }
         cli::Commands::Report { run_id } => {
-            if let Err(e) = handle_report(run_id.as_deref()) {
-                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+            if let Err(e) = handle_report(run_id.as_deref(), &redactor, &environment, &mut output) {
+                emit_error(&mut output, &e.to_string());
                 std::process::exit(1);
             }
         }
@@ -193,9 +236,17 @@ fn main() {
             lines,
         } => {
             if let Err(e) = handle_retrieve(
-                &run_id, &stream, start_line, lines, &redactor, &injector, &config,
+                &run_id,
+                &stream,
+                start_line,
+                lines,
+                &redactor,
+                &injector,
+                &config,
+                &environment,
+                &mut output,
             ) {
-                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+                emit_error(&mut output, &e.to_string());
                 std::process::exit(1);
             }
         }
@@ -213,70 +264,105 @@ fn main() {
                 &redactor,
                 &injector,
                 &config,
+                &environment,
+                &mut output,
             ) {
-                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+                emit_error(&mut output, &e.to_string());
                 std::process::exit(1);
             }
         }
         cli::Commands::Store { command } => {
-            if let Err(e) = handle_store(command, &redactor) {
-                eprintln!("{}", format_error_for_stderr(&e.to_string(), &redactor));
+            if let Err(e) = handle_store(command, &environment, &mut output) {
+                emit_error(&mut output, &e.to_string());
                 std::process::exit(1);
             }
         }
     }
 }
 
+fn path_boundary_to_io(error: PathBoundaryError) -> io::Error {
+    let kind = match &error {
+        PathBoundaryError::WorkspaceRoot(error)
+        | PathBoundaryError::NotFound(error)
+        | PathBoundaryError::Io(error) => error.kind(),
+        PathBoundaryError::PolicyDenied { .. }
+        | PathBoundaryError::OutsideWorkspace
+        | PathBoundaryError::SymlinkNotAllowed => io::ErrorKind::PermissionDenied,
+        PathBoundaryError::WrongTargetKind { .. } | PathBoundaryError::UnsupportedFileType => {
+            io::ErrorKind::InvalidInput
+        }
+    };
+    io::Error::new(kind, error)
+}
+
+fn cat_path_boundary_rejection(
+    error: &PathBoundaryError,
+    output: &mut OutputRouter<'_>,
+) -> io::Result<Option<io::Error>> {
+    let (path_rule, message) = if let Some(rule) = error.policy_rule() {
+        (rule, "Access to blocked path was denied")
+    } else if error.is_workspace_boundary() {
+        (
+            WORKSPACE_BOUNDARY_RULE,
+            "Access outside workspace was denied",
+        )
+    } else if matches!(error, PathBoundaryError::SymlinkNotAllowed) {
+        (
+            WORKSPACE_BOUNDARY_RULE,
+            "Access through symbolic link was denied",
+        )
+    } else {
+        return Ok(None);
+    };
+
+    let status = blocked_cat_output("path_blocked", path_rule, 0);
+    output.emit_stdout_prepared(&status, PromptInjectionAction::Warn, false)?;
+    Ok(Some(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        message,
+    )))
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WB-15-001: retain the migrated cat boundary until the application context refactor"
+)]
 fn handle_cat(
     file_path: &str,
     path_guard: &PathGuard,
     redactor: &Redactor,
     injector: &Injector,
     config: &config::Config,
-    persistence: &mut PersistencePolicy,
+    environment: &dyn EnvironmentAdapter,
+    output: &mut OutputRouter<'_>,
+    persistence: &mut Persistence,
 ) -> io::Result<()> {
-    // 危険パスのブロック
-    if let Some(path_rule) = path_guard.block_rule(file_path) {
-        let status = sanitized_blocked_cat_output("path_blocked", path_rule, 0, redactor);
-        let final_output = utils::wrap_untrusted(&status);
+    let workspace_root = environment.workspace_root()?;
+    let resolver = WorkspaceResolver::new(workspace_root).map_err(path_boundary_to_io)?;
+    let file = match resolver.resolve_existing_file(Path::new(file_path), path_guard) {
+        Ok(file) => file,
+        Err(error) => {
+            if let Some(rejection) = cat_path_boundary_rejection(&error, output)? {
+                return Err(rejection);
+            }
+            return Err(path_boundary_to_io(error));
+        }
+    };
 
-        println!("{}", final_output);
-
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Access to blocked path was denied",
-        ));
-    }
-
-    if !is_inside_workspace(file_path)? {
-        let status =
-            sanitized_blocked_cat_output("path_blocked", WORKSPACE_BOUNDARY_RULE, 0, redactor);
-        let final_output = utils::wrap_untrusted(&status);
-
-        println!("{}", final_output);
-
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "Access outside workspace was denied",
-        ));
-    }
-
-    // ファイル読み込み
-    let bytes = fs::read(file_path)?;
+    // Read through the canonical target carried by the private capability.
+    let bytes = resolver.read_file(&file)?;
     let content = String::from_utf8_lossy(&bytes).into_owned();
 
     // シークレット候補があれば原則BLOCK
     if redactor.has_secret(&content) {
         let redacted = redactor.redact(&content);
         let redactions = Redactor::count_redactions(&content, &redacted);
-        let status = sanitized_blocked_cat_output("secret_detected", "", redactions, redactor);
+        let status = blocked_cat_output("secret_detected", "", redactions);
         let warnings = injector.detect_injection(&redacted);
-        let final_output = utils::wrap_untrusted(&status);
-
-        println!("{}", final_output);
+        let rendered = output.emit_stdout_prepared(&status, PromptInjectionAction::Warn, false)?;
 
         let raw_bytes = bytes.len();
-        let returned_bytes = final_output.len();
+        let returned_bytes = rendered.content().map_or(0, str::len);
         let reduction = if raw_bytes > 0 {
             ((raw_bytes as f64 - returned_bytes as f64) / raw_bytes as f64) * 100.0
         } else {
@@ -285,7 +371,7 @@ fn handle_cat(
 
         let stats = Stats {
             run_id: Uuid::new_v4().to_string(),
-            command: Some(redactor.redact(&format!("cat {}", file_path))),
+            command: Some(redactor.redact(&format!("cat {file_path}"))),
             exit_code: Some(1),
             raw_bytes,
             returned_bytes,
@@ -297,9 +383,10 @@ fn handle_cat(
             timestamp: Utc::now().to_rfc3339(),
         };
 
-        print_stats_to_stderr(&stats);
-        let receipt = persist_stats(persistence, &stats, safety::empty_stored_content(), "cat");
-        print_storage_receipt(&receipt);
+        print_stats_to_stderr(&stats, redactor, output)?;
+        let stored_content = safety::empty_stored_content();
+        let receipt = persist_stats(persistence, &stats, &stored_content, "cat");
+        print_storage_receipt(&receipt, output)?;
 
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -311,18 +398,11 @@ fn handle_cat(
     let scan_redactions = Redactor::count_redactions(&content, &redacted_for_scan);
     let warnings = injector.detect_injection(&redacted_for_scan);
     if warnings > 0 && config.prompt_injection_action == PromptInjectionAction::Block {
-        let status = sanitized_blocked_cat_output(
-            "prompt_injection_detected",
-            "",
-            scan_redactions,
-            redactor,
-        );
-        let final_output = utils::wrap_untrusted(&status);
-
-        println!("{}", final_output);
+        let status = blocked_cat_output("prompt_injection_detected", "", scan_redactions);
+        let rendered = output.emit_stdout_prepared(&status, PromptInjectionAction::Warn, false)?;
 
         let raw_bytes = bytes.len();
-        let returned_bytes = final_output.len();
+        let returned_bytes = rendered.content().map_or(0, str::len);
         let reduction = if raw_bytes > 0 {
             ((raw_bytes as f64 - returned_bytes as f64) / raw_bytes as f64) * 100.0
         } else {
@@ -331,7 +411,7 @@ fn handle_cat(
 
         let stats = Stats {
             run_id: Uuid::new_v4().to_string(),
-            command: Some(redactor.redact(&format!("cat {}", file_path))),
+            command: Some(redactor.redact(&format!("cat {file_path}"))),
             exit_code: Some(1),
             raw_bytes,
             returned_bytes,
@@ -343,9 +423,10 @@ fn handle_cat(
             timestamp: Utc::now().to_rfc3339(),
         };
 
-        print_stats_to_stderr(&stats);
-        let receipt = persist_stats(persistence, &stats, safety::empty_stored_content(), "cat");
-        print_storage_receipt(&receipt);
+        print_stats_to_stderr(&stats, redactor, output)?;
+        let stored_content = safety::empty_stored_content();
+        let receipt = persist_stats(persistence, &stats, &stored_content, "cat");
+        print_storage_receipt(&receipt, output)?;
 
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -353,8 +434,8 @@ fn handle_cat(
         ));
     }
 
-    // サニタイズの適用。保存用に raw 相当の UTF-8 表現を借用できるよう、
-    // 表示用の分岐で所有権を消費しない。
+    // Keep the raw UTF-8 representation for persistence while the output
+    // path receives its own filtered copy.
     let content_for_store = content.clone();
     let redacted = if path_guard.should_redact(file_path) {
         redactor.redact(&content)
@@ -369,18 +450,18 @@ fn handle_cat(
     // インジェクション警告
     let warnings = injector.detect_injection(&filtered.content);
     if warnings > 0 {
-        eprintln!("WARNING: possible prompt-injection text detected.");
+        output.emit_stderr("WARNING: possible prompt-injection text detected.")?;
     }
 
-    // AI向け宣言
-    let final_output = utils::wrap_untrusted(&filtered.content);
-
-    // 出力
-    println!("{}", final_output);
+    let rendered = output.emit_stdout_prepared(
+        &filtered.content,
+        config.prompt_injection_action,
+        truncated_flag,
+    )?;
 
     // stats記録
     let raw_bytes = bytes.len();
-    let returned_bytes = final_output.len();
+    let returned_bytes = rendered.content().map_or(0, str::len);
     let reduction = if raw_bytes > 0 {
         ((raw_bytes as f64 - returned_bytes as f64) / raw_bytes as f64) * 100.0
     } else {
@@ -390,7 +471,7 @@ fn handle_cat(
 
     let stats = Stats {
         run_id: Uuid::new_v4().to_string(),
-        command: Some(redactor.redact(&format!("cat {}", file_path))),
+        command: Some(redactor.redact(&format!("cat {file_path}"))),
         exit_code: Some(0),
         raw_bytes,
         returned_bytes,
@@ -402,53 +483,37 @@ fn handle_cat(
         timestamp: Utc::now().to_rfc3339(),
     };
 
-    print_stats_to_stderr(&stats);
-    let receipt = persist_stats(
-        persistence,
-        &stats,
-        safety::sanitize_for_storage(&content_for_store, "", redactor),
-        "cat",
-    );
-    print_storage_receipt(&receipt);
+    print_stats_to_stderr(&stats, redactor, output)?;
+    let stored_content = safety::sanitize_for_storage(&content_for_store, "", redactor);
+    let receipt = persist_stats(persistence, &stats, &stored_content, "cat");
+    print_storage_receipt(&receipt, output)?;
 
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WB-15-002: retain the migrated grep boundary until the application context refactor"
+)]
 fn handle_grep(
     pattern: &str,
     target_path: &str,
     path_guard: &PathGuard,
     redactor: &Redactor,
     injector: &Injector,
-    _config: &config::Config,
-    persistence: &mut PersistencePolicy,
+    config: &config::Config,
+    environment: &dyn EnvironmentAdapter,
+    output: &mut OutputRouter<'_>,
+    persistence: &mut Persistence,
 ) -> io::Result<()> {
-    let mut results = Vec::new();
-    let mut grep_redactions = 0;
-    let path = Path::new(target_path);
+    let workspace_root = environment.workspace_root()?;
+    let resolver = WorkspaceResolver::new(workspace_root).map_err(path_boundary_to_io)?;
+    let target = resolver
+        .resolve_existing(Path::new(target_path), path_guard)
+        .map_err(path_boundary_to_io)?;
+    let outcome = resolver.grep(target, pattern, path_guard)?;
 
-    if path.is_dir() {
-        visit_dirs(
-            path,
-            pattern,
-            path_guard,
-            redactor,
-            &mut results,
-            &mut grep_redactions,
-        )?;
-    } else {
-        let path_str = path.to_string_lossy();
-        if !path_guard.should_block(&path_str) {
-            grep_file(
-                path,
-                pattern,
-                path_guard,
-                redactor,
-                &mut results,
-                &mut grep_redactions,
-            )?;
-        }
-    }
+    let (results, grep_redactions) = render_grep_matches(&outcome, redactor);
 
     let raw_results = results.join("\n");
     let raw_bytes = raw_results.len();
@@ -462,17 +527,29 @@ fn handle_grep(
     // インジェクション警告
     let warnings = injector.detect_injection(&filtered.content);
     if warnings > 0 {
-        eprintln!("WARNING: possible prompt-injection text detected.");
+        output.emit_stderr("WARNING: possible prompt-injection text detected.")?;
     }
 
-    // AI向け宣言
-    let final_output = utils::wrap_untrusted(&filtered.content);
+    if outcome.completeness.is_partial() {
+        let diagnostics = format_traversal_diagnostics(&outcome, redactor);
+        output.emit_stderr_prepared(&diagnostics, PromptInjectionAction::Warn, false)?;
+    }
 
-    // 出力
-    println!("{}", final_output);
+    let rendered = output.emit_stdout_prepared(
+        &filtered.content,
+        config.prompt_injection_action,
+        truncated_flag,
+    )?;
+
+    if rendered.is_blocked() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            GREP_PROMPT_INJECTION_BLOCKED_ERROR,
+        ));
+    }
 
     // stats記録
-    let returned_bytes = final_output.len();
+    let returned_bytes = rendered.content().map_or(0, str::len);
     let reduction = if raw_bytes > 0 {
         ((raw_bytes as f64 - returned_bytes as f64) / raw_bytes as f64) * 100.0
     } else {
@@ -482,8 +559,12 @@ fn handle_grep(
 
     let stats = Stats {
         run_id: Uuid::new_v4().to_string(),
-        command: Some(redactor.redact(&format!("grep {} {}", pattern, target_path))),
-        exit_code: Some(0),
+        command: Some(redactor.redact(&format!("grep {pattern} {target_path}"))),
+        exit_code: Some(if outcome.completeness.is_partial() {
+            2
+        } else {
+            0
+        }),
         raw_bytes,
         returned_bytes,
         reduction,
@@ -494,71 +575,49 @@ fn handle_grep(
         timestamp: Utc::now().to_rfc3339(),
     };
 
-    print_stats_to_stderr(&stats);
-    let receipt = persist_stats(
-        persistence,
-        &stats,
-        safety::sanitize_for_storage(&raw_results, "", redactor),
-        "grep",
+    print_stats_to_stderr(&stats, redactor, output)?;
+    let stored_content = safety::sanitize_for_storage(&raw_results, "", redactor);
+    let receipt = persist_stats(persistence, &stats, &stored_content, "grep");
+    print_storage_receipt(&receipt, output)?;
+
+    if outcome.completeness == TraversalCompleteness::Partial {
+        Err(io::Error::other(GREP_PARTIAL_ERROR))
+    } else {
+        Ok(())
+    }
+}
+
+fn render_grep_matches(outcome: &GrepOutcome, redactor: &Redactor) -> (Vec<String>, usize) {
+    let mut results = Vec::with_capacity(outcome.matches.len());
+    let mut redactions = 0;
+
+    for matched in &outcome.matches {
+        let processed_line = redactor.redact(&matched.content);
+        redactions += Redactor::count_redactions(&matched.content, &processed_line);
+        results.push(format!(
+            "{}:{}:{}",
+            matched.display_path.display(),
+            matched.line_number,
+            processed_line
+        ));
+    }
+
+    (results, redactions)
+}
+
+fn format_traversal_diagnostics(outcome: &GrepOutcome, redactor: &Redactor) -> String {
+    let mut output = format!(
+        "traversal_status: partial\ntraversal_diagnostics: {}\n",
+        outcome.diagnostics.len()
     );
-    print_storage_receipt(&receipt);
-
-    Ok(())
-}
-
-fn visit_dirs(
-    dir: &Path,
-    pattern: &str,
-    path_guard: &PathGuard,
-    redactor: &Redactor,
-    results: &mut Vec<String>,
-    redactions: &mut usize,
-) -> io::Result<()> {
-    if dir.is_dir() {
-        for entry in fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let path_str = path.to_string_lossy();
-
-            if path_guard.should_block(&path_str) {
-                continue;
-            }
-
-            if path.is_dir() {
-                visit_dirs(&path, pattern, path_guard, redactor, results, redactions)?;
-            } else {
-                grep_file(&path, pattern, path_guard, redactor, results, redactions)?;
-            }
-        }
+    for diagnostic in &outcome.diagnostics {
+        output.push_str(&format!(
+            "traversal_diagnostic: {} path: {}\n",
+            diagnostic.kind().label(),
+            diagnostic.display_path().display()
+        ));
     }
-    Ok(())
-}
-
-fn grep_file(
-    path: &Path,
-    pattern: &str,
-    _path_guard: &PathGuard,
-    redactor: &Redactor,
-    results: &mut Vec<String>,
-    redactions: &mut usize,
-) -> io::Result<()> {
-    let path_str = path.to_string_lossy().into_owned();
-    let file = fs::File::open(path)?;
-    let reader = BufReader::new(file);
-
-    for (line_num, line) in reader.lines().enumerate() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue, // バイナリなどの読み込みエラーはスキップ
-        };
-
-        if line.contains(pattern) {
-            let processed_line = redactor.redact(&line);
-            *redactions += Redactor::count_redactions(&line, &processed_line);
-            results.push(format!("{}:{}:{}", path_str, line_num + 1, processed_line));
-        }
-    }
-    Ok(())
+    final_output_filter(&output, redactor).content
 }
 
 fn truncate_lines(lines: &[String], max_lines: usize) -> (String, usize) {
@@ -587,6 +646,10 @@ fn truncate_lines(lines: &[String], max_lines: usize) -> (String, usize) {
     (output, omitted_bytes)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WB-15-003: retain the migrated run boundary until the application context refactor"
+)]
 fn handle_run(
     command_args: &[String],
     report_json: Option<&str>,
@@ -594,14 +657,15 @@ fn handle_run(
     redactor: &Redactor,
     injector: &Injector,
     config: &config::Config,
-    persistence: &mut PersistencePolicy,
+    environment: &dyn EnvironmentAdapter,
+    process: &dyn ProcessAdapter,
+    output: &mut OutputRouter<'_>,
+    persistence: &mut Persistence,
 ) -> io::Result<()> {
     for arg in command_args {
         if let Some(path_rule) = path_guard.block_rule(arg) {
-            let status = sanitized_blocked_cat_output("path_blocked", path_rule, 0, redactor);
-            let final_output = utils::wrap_untrusted(&status);
-
-            println!("{}", final_output);
+            let status = blocked_cat_output("path_blocked", path_rule, 0);
+            output.emit_stdout_prepared(&status, PromptInjectionAction::Warn, false)?;
 
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -611,34 +675,44 @@ fn handle_run(
     }
 
     let timeout_dur = Duration::from_secs(config.timeout_seconds);
-    let res = executor::execute_command(
+    let res = executor::execute_command_with_adapters(
         command_args,
         path_guard,
         redactor,
         injector,
         timeout_dur,
         config.max_chars,
+        environment,
+        process,
     )?;
 
-    let filtered_stdout = final_output_filter(&res.stdout, redactor);
-    let filtered_stderr = final_output_filter(&res.stderr, redactor);
+    let stdout_render = output.emit_stdout_prepared(
+        &res.stdout,
+        config.prompt_injection_action,
+        res.stats.truncated,
+    )?;
+    let stderr_render = output.emit_stderr_prepared(
+        &res.stderr,
+        config.prompt_injection_action,
+        res.stats.truncated,
+    )?;
 
-    // AI向け宣言でラップ
-    let final_stdout = utils::wrap_untrusted(&filtered_stdout.content);
-
-    // 出力
-    println!("{}", final_stdout);
-    eprintln!("{}", filtered_stderr.content);
+    if stdout_render.is_blocked() || stderr_render.is_blocked() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            RUN_PROMPT_INJECTION_BLOCKED_ERROR,
+        ));
+    }
 
     // インジェクション警告の検出確認
     if res.stats.prompt_injection_warnings > 0 {
-        eprintln!("WARNING: possible prompt-injection text detected.");
+        output.emit_stderr("WARNING: possible prompt-injection text detected.")?;
     }
 
     // stats記録と表示
     let mut stats = res.stats.clone();
-    stats.redactions += filtered_stdout.redactions + filtered_stderr.redactions;
-    stats.returned_bytes = final_stdout.len() + filtered_stderr.content.len();
+    stats.returned_bytes =
+        stdout_render.content().map_or(0, str::len) + stderr_render.content().map_or(0, str::len);
     let raw_bytes = stats.raw_bytes;
     stats.reduction = if raw_bytes > 0 {
         ((raw_bytes as f64 - stats.returned_bytes as f64) / raw_bytes as f64) * 100.0
@@ -647,17 +721,14 @@ fn handle_run(
     };
     stats.reduction = stats.reduction.max(0.0);
 
-    let receipt = persist_stats(
-        persistence,
-        &stats,
-        safety::sanitize_for_storage(&res.stored_stdout, &res.stored_stderr, redactor),
-        "run",
-    );
+    let stored_content =
+        safety::sanitize_for_storage(&res.stored_stdout, &res.stored_stderr, redactor);
+    let receipt = persist_stats(persistence, &stats, &stored_content, "run");
     if let Some(path) = report_json {
         write_stats_json(path, &stats)?;
     }
-    print_stats_to_stderr(&stats);
-    print_storage_receipt(&receipt);
+    print_stats_to_stderr(&stats, redactor, output)?;
+    print_storage_receipt(&receipt, output)?;
 
     if let Some(code) = res.stats.exit_code {
         std::process::exit(code);
@@ -667,22 +738,25 @@ fn handle_run(
 }
 
 fn persist_stats(
-    persistence: &mut PersistencePolicy,
+    persistence: &mut Persistence,
     stats: &Stats,
-    content: SanitizedStoredContent,
+    content: &SanitizedStoredContent,
     command_kind: &str,
 ) -> StorageReceipt {
-    persistence.commit(stats, content, command_kind)
+    persistence.store(stats, content, command_kind)
 }
 
-fn print_storage_receipt(receipt: &StorageReceipt) {
+fn print_storage_receipt(
+    receipt: &StorageReceipt,
+    output: &mut OutputRouter<'_>,
+) -> io::Result<()> {
     // A successfully stored run already exposes its run_id through the
     // existing stats block. Keep the Level 1 contract stable; explicit
     // no-store and failure receipts must still be visible.
     if receipt.stored {
-        return;
+        return Ok(());
     }
-    eprintln!(
+    let mut content = format!(
         "[llm-veil storage]\nrun_id: {}\nstored: {}\nretrievable: {}\nstorage_reason: {}",
         receipt.run_id,
         receipt.stored,
@@ -690,8 +764,11 @@ fn print_storage_receipt(receipt: &StorageReceipt) {
         receipt.reason.as_str()
     );
     if let Some(expires_at) = receipt.expires_at {
-        eprintln!("expires_at_unix: {}", expires_at);
+        content.push_str(&format!("\nexpires_at_unix: {expires_at}"));
     }
+    output
+        .emit_stderr_prepared(&content, PromptInjectionAction::Warn, false)
+        .map(|_| ())
 }
 
 fn parse_stream(value: &str) -> io::Result<Stream> {
@@ -712,6 +789,10 @@ fn lookup_status_error(status: LookupStatus, run_id: &str) -> io::Error {
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WB-15-004: retain the migrated retrieve boundary until the application context refactor"
+)]
 fn handle_retrieve(
     run_id: &str,
     stream_text: &str,
@@ -720,9 +801,11 @@ fn handle_retrieve(
     redactor: &Redactor,
     injector: &Injector,
     config: &config::Config,
+    environment: &dyn EnvironmentAdapter,
+    output: &mut OutputRouter<'_>,
 ) -> io::Result<()> {
     let stream = parse_stream(stream_text)?;
-    let mut store = RunStore::open_default()?;
+    let mut store = RunStore::open_default_with(environment)?;
     let result = store.retrieve_lines_at(
         run_id,
         stream,
@@ -736,17 +819,18 @@ fn handle_retrieve(
     )?;
     if result.status != LookupStatus::Active {
         if result.status == LookupStatus::Blocked {
-            print!(
-                "{}",
-                utils::wrap_untrusted_bounded(
-                    &format!(
-                        "status: blocked\nrun_id: {}\nstream: {}\nprompt_injection: true",
-                        result.run_id,
-                        result.stream.as_str()
-                    ),
-                    config.max_chars,
-                )
+            let blocked_render = output::render_external(
+                &format!(
+                    "status: blocked\nrun_id: {}\nstream: {}\nprompt_injection: true",
+                    result.run_id,
+                    result.stream.as_str()
+                ),
+                redactor,
+                injector,
+                PromptInjectionAction::Warn,
+                config.max_chars,
             );
+            output.emit_stdout_render(&blocked_render)?;
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "retrieval blocked by prompt-injection policy",
@@ -754,12 +838,16 @@ fn handle_retrieve(
         }
         return Err(lookup_status_error(result.status, run_id));
     }
-    if let Some(content) = result.content {
-        print!("{}", content);
+    if let Some(content) = result.content.as_ref() {
+        output.emit_stdout_render(content)?;
     }
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "WB-15-005: retain the migrated search boundary until the application context refactor"
+)]
 fn handle_search(
     run_id: &str,
     stream_text: &str,
@@ -768,9 +856,11 @@ fn handle_search(
     redactor: &Redactor,
     injector: &Injector,
     config: &config::Config,
+    environment: &dyn EnvironmentAdapter,
+    output: &mut OutputRouter<'_>,
 ) -> io::Result<()> {
     let stream = parse_stream(stream_text)?;
-    let mut store = RunStore::open_default()?;
+    let mut store = RunStore::open_default_with(environment)?;
     let result = store.search_at(run_id, stream, literal, cursor, Utc::now().timestamp())?;
     if result.status != LookupStatus::Active {
         return Err(lookup_status_error(result.status, run_id));
@@ -786,25 +876,26 @@ fn handle_search(
         body.push_str("scan_truncated: true\n");
     }
     if let Some(next_cursor) = &result.next_cursor {
-        body.push_str(&format!("next_cursor: {}\n", next_cursor));
+        body.push_str(&format!("next_cursor: {next_cursor}\n"));
     }
     for matched in &result.matches {
         body.push_str(&format!("line {}: {}\n", matched.line, matched.content));
     }
 
-    let mut render = safety::render_for_external(
+    let mut render = output::render_external(
         &body,
         redactor,
         injector,
         config.prompt_injection_action,
         config.max_chars,
     );
-    if !render.blocked && render.injection_warnings > 0 {
+    if !render.is_blocked() && render.injection_warnings() > 0 {
         body = format!(
             "prompt_injection_warnings: {}\n{}",
-            render.injection_warnings, body
+            render.injection_warnings(),
+            body
         );
-        render = safety::render_for_external(
+        render = output::render_external(
             &body,
             redactor,
             injector,
@@ -812,37 +903,50 @@ fn handle_search(
             config.max_chars,
         );
     }
-    if render.blocked {
-        print!(
-            "{}",
-            utils::wrap_untrusted_bounded(
-                &format!(
-                    "status: blocked\nrun_id: {}\nstream: {}\nprompt_injection: true",
-                    run_id,
-                    stream.as_str()
-                ),
-                config.max_chars,
-            )
+    if render.is_blocked() {
+        let blocked_render = output::render_external(
+            &format!(
+                "status: blocked\nrun_id: {}\nstream: {}\nprompt_injection: true",
+                run_id,
+                stream.as_str()
+            ),
+            redactor,
+            injector,
+            PromptInjectionAction::Warn,
+            config.max_chars,
         );
+        output.emit_stdout_render(&blocked_render)?;
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "search blocked by prompt-injection policy",
         ));
     }
-    let content = render.content.unwrap_or_default();
-    print!(
-        "{}",
-        utils::wrap_untrusted_bounded(&content, config.max_chars)
-    );
+    output.emit_stdout_render(&render)?;
     Ok(())
 }
 
-fn handle_store(command: cli::StoreCommands, redactor: &Redactor) -> io::Result<()> {
-    let mut store = RunStore::open_default()?;
+fn handle_store(
+    command: cli::StoreCommands,
+    environment: &dyn EnvironmentAdapter,
+    output: &mut OutputRouter<'_>,
+) -> io::Result<()> {
+    let mut store = RunStore::open_default_with(environment)?;
     match command {
         cli::StoreCommands::Delete { run_id } => match store.delete(&run_id)? {
-            DeleteStatus::Deleted => println!("run_id: {}\nstatus: deleted", run_id),
-            DeleteStatus::AlreadyGone => println!("run_id: {}\nstatus: already_gone", run_id),
+            DeleteStatus::Deleted => {
+                output.emit_stdout_prepared(
+                    &format!("run_id: {run_id}\nstatus: deleted"),
+                    PromptInjectionAction::Warn,
+                    false,
+                )?;
+            }
+            DeleteStatus::AlreadyGone => {
+                output.emit_stdout_prepared(
+                    &format!("run_id: {run_id}\nstatus: already_gone"),
+                    PromptInjectionAction::Warn,
+                    false,
+                )?;
+            }
             DeleteStatus::NotFound => {
                 return Err(lookup_status_error(LookupStatus::NotFound, &run_id));
             }
@@ -855,27 +959,40 @@ fn handle_store(command: cli::StoreCommands, redactor: &Redactor) -> io::Result<
                 ));
             }
             let removed = store.purge(expired && !all)?;
-            println!("status: purged\nremoved: {}", removed);
+            output.emit_stdout_prepared(
+                &format!("status: purged\nremoved: {removed}"),
+                PromptInjectionAction::Warn,
+                false,
+            )?;
         }
         cli::StoreCommands::Status => {
             let status = store.status()?;
-            println!(
-                "root: {}\nactive_records: {}\ntombstones: {}\nttl_seconds: {}\nmax_stream_bytes: {}\nmax_total_bytes: {}\nmax_records: {}",
-                redactor.redact(&status.root.display().to_string()),
-                status.active_records,
-                status.tombstones,
-                status.config.ttl_secs,
-                status.config.max_stream_bytes,
-                status.config.max_total_bytes,
-                status.config.max_records
-            );
+            output.emit_stdout_prepared(
+                &format!(
+                    "root: {}\nactive_records: {}\ntombstones: {}\nttl_seconds: {}\nmax_stream_bytes: {}\nmax_total_bytes: {}\nmax_records: {}",
+                    status.root.display(),
+                    status.active_records,
+                    status.tombstones,
+                    status.config.ttl_secs,
+                    status.config.max_stream_bytes,
+                    status.config.max_total_bytes,
+                    status.config.max_records
+                ),
+                PromptInjectionAction::Warn,
+                false,
+            )?;
         }
     }
     Ok(())
 }
 
-fn handle_report(run_id: Option<&str>) -> io::Result<()> {
-    let stats = match RunStore::open_default() {
+fn handle_report(
+    run_id: Option<&str>,
+    redactor: &Redactor,
+    environment: &dyn EnvironmentAdapter,
+    output: &mut OutputRouter<'_>,
+) -> io::Result<()> {
+    let stats = match RunStore::open_default_with(environment) {
         Ok(mut store) => match store.load_stats(run_id) {
             Ok(stats) => stats,
             Err(error)
@@ -905,10 +1022,8 @@ fn handle_report(run_id: Option<&str>) -> io::Result<()> {
             }
         }
     };
-    let redactor = Redactor::new();
-    let output = format_report_output(&stats, &redactor);
-
-    print!("{}", output);
+    let report = format_report_output(&stats, redactor);
+    output.emit_stdout_prepared(&report, PromptInjectionAction::Warn, false)?;
 
     Ok(())
 }
@@ -945,9 +1060,15 @@ fn format_report_output(stats: &Stats, redactor: &Redactor) -> String {
     final_output_filter(&output, redactor).content
 }
 
-fn print_stats_to_stderr(stats: &Stats) {
-    let redactor = Redactor::new();
-    eprint!("{}", format_stats_for_stderr(stats, &redactor));
+fn print_stats_to_stderr(
+    stats: &Stats,
+    redactor: &Redactor,
+    output: &mut OutputRouter<'_>,
+) -> io::Result<()> {
+    let content = format_stats_for_stderr(stats, redactor);
+    output
+        .emit_stderr_prepared(&content, PromptInjectionAction::Warn, false)
+        .map(|_| ())
 }
 
 fn format_stats_for_stderr(stats: &Stats, redactor: &Redactor) -> String {
@@ -959,7 +1080,7 @@ fn format_stats_for_stderr(stats: &Stats, redactor: &Redactor) -> String {
         output.push_str(&format!("command: {}\n", redactor.redact(cmd)));
     }
     if let Some(code) = stats.exit_code {
-        output.push_str(&format!("exit_code: {}\n", code));
+        output.push_str(&format!("exit_code: {code}\n"));
     }
     output.push_str(&format!("raw_bytes: {}\n", stats.raw_bytes));
     output.push_str(&format!("returned_bytes: {}\n", stats.returned_bytes));
@@ -982,24 +1103,28 @@ mod tests {
 
     #[test]
     fn test_grep_file_redacts_secret_on_allowed_path() {
-        let file_path = std::env::temp_dir().join(format!("llm-veil-grep-{}.txt", Uuid::new_v4()));
+        let environment = SystemEnvironment;
+        let file_path = environment
+            .current_dir()
+            .unwrap()
+            .join(format!("llm-veil-grep-{}.txt", Uuid::new_v4()));
         let mut file = fs::File::create(&file_path).unwrap();
         writeln!(file, "const token = \"my_jwt_token\";").unwrap();
 
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
-        let mut results = Vec::new();
-        let mut redactions = 0;
-
-        grep_file(
-            &file_path,
-            "token",
-            &path_guard,
-            &redactor,
-            &mut results,
-            &mut redactions,
-        )
-        .unwrap();
+        let resolver = WorkspaceResolver::new(environment.current_dir().unwrap()).unwrap();
+        let file = resolver
+            .resolve_existing_file(&file_path, &path_guard)
+            .unwrap();
+        let outcome = resolver
+            .grep(
+                path_io::ExistingWorkspaceTarget::File(file),
+                "token",
+                &path_guard,
+            )
+            .unwrap();
+        let (results, redactions) = render_grep_matches(&outcome, &redactor);
         fs::remove_file(&file_path).unwrap();
 
         assert_eq!(results.len(), 1);
@@ -1010,7 +1135,9 @@ mod tests {
 
     #[test]
     fn test_handle_cat_blocks_secrets() {
-        let file_path = std::env::current_dir()
+        let environment = SystemEnvironment;
+        let file_path = environment
+            .current_dir()
             .unwrap()
             .join(format!("llm-veil-cat-{}.txt", Uuid::new_v4()));
         let mut file = fs::File::create(&file_path).unwrap();
@@ -1019,6 +1146,7 @@ mod tests {
         let path_guard = PathGuard::new(vec![], PathAction::Allow).unwrap();
         let redactor = Redactor::new();
         let injector = Injector::new();
+        let environment = SystemEnvironment;
         let config = config::Config {
             action: PathAction::Allow,
             prompt_injection_action: PromptInjectionAction::Block,
@@ -1026,7 +1154,15 @@ mod tests {
             max_chars: 1000,
             blocked_patterns: vec![],
         };
-        let mut persistence = PersistencePolicy::new(true);
+        let mut persistence = Persistence::new_with_environment(true, &environment);
+        let mut std_output = StdOutputAdapter;
+        let mut output = OutputRouter::new(
+            &mut std_output,
+            &redactor,
+            &injector,
+            config.prompt_injection_action,
+            config.max_chars,
+        );
 
         let res = handle_cat(
             file_path.to_str().unwrap(),
@@ -1034,6 +1170,8 @@ mod tests {
             &redactor,
             &injector,
             &config,
+            &environment,
+            &mut output,
             &mut persistence,
         );
         fs::remove_file(&file_path).unwrap();
