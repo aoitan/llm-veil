@@ -48,11 +48,9 @@ impl PathGuard {
         }
 
         // 先頭の "./" を取り除いた相対パスでチェック
-        let normalized = if path_for_matching.starts_with("./") {
-            &path_for_matching[2..]
-        } else {
-            path_for_matching
-        };
+        let normalized = path_for_matching
+            .strip_prefix("./")
+            .unwrap_or(path_for_matching);
         if let Some((rule, _)) = self
             .patterns
             .iter()
@@ -71,9 +69,11 @@ impl PathGuard {
         // 3. 各パスコンポーネント（中間ディレクトリ）に対するマッチ (例: ".git/config" の ".git")
         for comp in path_obj.components() {
             if let Some(comp_str) = comp.as_os_str().to_str() {
-                if let Some((rule, _)) = self.patterns.iter().find(|(_, pat)| {
-                    pat.matches(comp_str) || pat.matches(&format!("{}/", comp_str))
-                }) {
+                if let Some((rule, _)) = self
+                    .patterns
+                    .iter()
+                    .find(|(_, pat)| pat.matches(comp_str) || pat.matches(&format!("{comp_str}/")))
+                {
                     return Some(rule);
                 }
             }
@@ -82,6 +82,25 @@ impl PathGuard {
         None
     }
 
+    /// Match only the spelling supplied by the caller.
+    ///
+    /// The existing `block_rule` method also canonicalizes a path when the
+    /// spelling does not match. Path-boundary resolution needs to apply the
+    /// raw spelling and the already-resolved canonical target as two
+    /// deliberate policy stages, so it must not resolve the path a second
+    /// time here.
+    pub(crate) fn block_rule_for_path(&self, path: &Path) -> Option<&str> {
+        if self.action == PathAction::Block {
+            self.matching_rule_for_text(&path.to_string_lossy())
+        } else {
+            None
+        }
+    }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "DL-003: path policy resolves command-path aliases in its own adapter"
+    )]
     fn matching_rule(&self, path: &str) -> Option<&str> {
         if let Some(rule) = self.matching_rule_for_text(path) {
             return Some(rule);

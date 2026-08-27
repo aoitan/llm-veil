@@ -1,7 +1,28 @@
+#![deny(unfulfilled_lint_expectations)]
+
 //! Disposable Issue #2 spike. This is deliberately not wired into the CLI.
 
 #[path = "../src/injector.rs"]
 mod injector;
+mod platform {
+    use std::ffi::OsString;
+
+    pub(crate) trait EnvironmentAdapter {
+        fn value(&self, name: &str) -> Option<OsString>;
+    }
+
+    pub(crate) struct SystemEnvironment;
+
+    impl EnvironmentAdapter for SystemEnvironment {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "WB-15-018: disposable spike environment adapter reads process configuration"
+        )]
+        fn value(&self, name: &str) -> Option<OsString> {
+            std::env::var_os(name)
+        }
+    }
+}
 #[path = "../src/redactor.rs"]
 mod redactor;
 #[path = "../src/truncator.rs"]
@@ -86,6 +107,10 @@ impl SpikeStore {
         write_private_file(&run_dir.join("redacted.json"), &bytes)
     }
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "WB-15-019: disposable storage spike reads its persisted fixture"
+    )]
     fn retrieve_lines(
         &mut self,
         run_id_text: &str,
@@ -163,6 +188,10 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "WB-15-020: disposable storage spike exercises its private-file writer"
+)]
 fn write_private_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -184,6 +213,10 @@ fn temp_root() -> PathBuf {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "WB-15-021: disposable storage spike inspects persisted redacted bytes"
+)]
 fn redacted_store_and_bounded_retrieval_spike() {
     let root = temp_root();
     let mut store = SpikeStore::new(root.clone()).unwrap();
@@ -260,6 +293,10 @@ fn redacted_store_and_bounded_retrieval_spike() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "WB-15-022: disposable storage spike checks no-store directory state"
+)]
 fn lifecycle_and_no_store_spike() {
     let root = temp_root();
     let mut store = SpikeStore::new(root.clone()).unwrap();

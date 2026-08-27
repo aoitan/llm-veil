@@ -1,0 +1,77 @@
+{
+  "schema_version": "1.0",
+  "exception_manifest": {
+    "path": "clippy-baseline.txt",
+    "scope": "item",
+    "forbid_crate_scope": true,
+    "forbid_blanket_allow": true
+  },
+  "rules": [
+    {
+      "id": "DL-001",
+      "level": "deny",
+      "lints": ["unsafe_code"],
+      "enforcement": ["crate", "script", "runtime"]
+    },
+    {
+      "id": "DL-002",
+      "level": "deny",
+      "lints": ["clippy::disallowed_methods", "clippy::disallowed_types"],
+      "enforcement": ["clippy", "script", "runtime"]
+    },
+    {
+      "id": "DL-003",
+      "level": "deny",
+      "lints": ["clippy::disallowed_methods"],
+      "enforcement": ["clippy", "script", "runtime"]
+    },
+    {
+      "id": "DL-004",
+      "level": "deny",
+      "lints": ["clippy::disallowed_macros"],
+      "enforcement": ["clippy", "script", "runtime"]
+    },
+    {
+      "id": "DL-005",
+      "level": "deny",
+      "lints": [],
+      "enforcement": ["script", "runtime"]
+    },
+    {
+      "id": "DL-006",
+      "level": "deny",
+      "lints": [],
+      "enforcement": ["script", "rustc", "runtime"]
+    },
+    {
+      "id": "DL-007",
+      "level": "deny",
+      "lints": ["clippy::disallowed_methods"],
+      "enforcement": ["clippy", "script", "runtime"]
+    },
+    {
+      "id": "DL-008",
+      "level": "warn",
+      "lints": ["unreachable_pub"],
+      "enforcement": ["crate", "clippy"]
+    },
+    {
+      "id": "DL-009",
+      "level": "advisory",
+      "lints": [],
+      "enforcement": ["cargo-modules"]
+    },
+    {
+      "id": "DL-010",
+      "level": "warn",
+      "lints": ["clippy::unwrap_used", "clippy::expect_used"],
+      "enforcement": ["crate", "clippy"]
+    },
+    {
+      "id": "DL-011",
+      "level": "advisory",
+      "lints": ["clippy::too_many_arguments"],
+      "enforcement": ["crate", "clippy"]
+    }
+  ]
+}

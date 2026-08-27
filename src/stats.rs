@@ -22,6 +22,7 @@ fn get_stats_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("llm-veil")
 }
 
+#[cfg(test)]
 pub fn save_stats(stats: &Stats) -> Result<(), io::Error> {
     uuid::Uuid::parse_str(&stats.run_id)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid run id"))?;
@@ -51,11 +52,15 @@ pub fn sanitized_stats_json(stats: &Stats) -> Result<String, io::Error> {
     Ok(redactor.redact(&json))
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "DL-003: statistics-file I/O is outside the workspace path adapter"
+)]
 pub fn load_stats(run_id: &str) -> Result<Stats, io::Error> {
     uuid::Uuid::parse_str(run_id)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid run id"))?;
     let dir = get_stats_dir();
-    let file_path = dir.join(format!("{}.json", run_id));
+    let file_path = dir.join(format!("{run_id}.json"));
 
     let json = fs::read_to_string(&file_path)?;
     let stats: Stats =
@@ -64,6 +69,10 @@ pub fn load_stats(run_id: &str) -> Result<Stats, io::Error> {
     Ok(stats)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "DL-003: statistics-file I/O is outside the workspace path adapter"
+)]
 pub fn load_last_stats() -> Result<Stats, io::Error> {
     let dir = get_stats_dir();
     let last_run_path = dir.join("last_run");
@@ -108,6 +117,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "DL-003: statistics fixture inspects the sanitized JSON file"
+    )]
     fn test_save_stats_redacts_secret_command_before_json_persistence() {
         let run_id = Uuid::new_v4().to_string();
         let stats = Stats {
@@ -131,7 +144,7 @@ mod tests {
         assert!(command.contains("SECRET_KEY=[REDACTED_SECRET]"));
         assert!(!command.contains("12345"));
 
-        let json_path = get_stats_dir().join(format!("{}.json", run_id));
+        let json_path = get_stats_dir().join(format!("{run_id}.json"));
         let json = fs::read_to_string(&json_path).unwrap();
         assert!(!json.contains("12345"));
     }

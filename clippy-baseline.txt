@@ -1,0 +1,25 @@
+# Item-local Clippy exception manifest, referenced by design-lint-manifest.json.
+# WB-15 baseline entries are retained until their owning refactor removes them.
+# id|lint(s)|file|item
+WB-15-001|clippy::too_many_arguments|src/main.rs|handle_cat
+WB-15-002|clippy::too_many_arguments|src/main.rs|handle_grep
+WB-15-003|clippy::too_many_arguments|src/main.rs|handle_run
+WB-15-004|clippy::too_many_arguments|src/main.rs|handle_retrieve
+WB-15-005|clippy::too_many_arguments|src/main.rs|handle_search
+WB-15-006|clippy::too_many_arguments|src/executor.rs|execute_command_with_adapters
+WB-15-007|dead_code|src/storage.rs|StorageError
+WB-15-008|dead_code|src/storage.rs|next_cursor
+WB-15-009|dead_code|src/storage.rs|scan_truncated
+WB-15-010|clippy::too_many_arguments|src/storage.rs|retrieve_lines_at
+WB-15-011|dead_code|src/output.rs|emit_stdout
+WB-15-012|clippy::disallowed_methods,clippy::disallowed_types|tests/contract_tests.rs|safety_gate_contract_verification_passes
+WB-15-013|clippy::disallowed_methods,clippy::disallowed_types|tests/contract_tests.rs|safety_gate_meta_verification_rejects_corrupted_snapshot
+WB-15-014|clippy::disallowed_methods|tests/level2_cli.rs|temp_data_home
+WB-15-015|clippy::disallowed_methods|tests/level2_cli.rs|new
+WB-15-016|clippy::disallowed_methods,clippy::disallowed_types|tests/level2_cli.rs|veil
+WB-15-017|clippy::disallowed_methods|tests/level2_cli.rs|default_storage_retrieval_delete_and_no_store_are_observable
+WB-15-018|clippy::disallowed_methods|tests/level2_storage_spike.rs|value
+WB-15-019|clippy::disallowed_methods|tests/level2_storage_spike.rs|retrieve_lines
+WB-15-020|clippy::disallowed_methods|tests/level2_storage_spike.rs|write_private_file
+WB-15-021|clippy::disallowed_methods|tests/level2_storage_spike.rs|redacted_store_and_bounded_retrieval_spike
+WB-15-022|clippy::disallowed_methods|tests/level2_storage_spike.rs|lifecycle_and_no_store_spike

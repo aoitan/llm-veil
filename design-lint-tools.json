@@ -1,0 +1,57 @@
+{
+  "schema_version": "1.0",
+  "toolchain": {
+    "channel": "1.88.0",
+    "cargo": "1.88.0",
+    "rustc": "1.88.0",
+    "rustfmt": "1.8.0"
+  },
+  "tools": [
+    {
+      "name": "cargo-deny",
+      "binary": "cargo-deny",
+      "version": "0.20.2",
+      "required": true,
+      "install": "cargo install --locked --version 0.20.2 cargo-deny",
+      "purpose": "advisory, ban, license, and source policy"
+    },
+    {
+      "name": "cargo-machete",
+      "binary": "cargo-machete",
+      "version": "0.9.2",
+      "required": true,
+      "install": "cargo install --locked --version 0.9.2 cargo-machete",
+      "purpose": "unused direct dependency detection"
+    },
+    {
+      "name": "cargo-modules",
+      "binary": "cargo-modules",
+      "version": "0.25.0",
+      "required": true,
+      "install": "cargo install --locked --version 0.25.0 cargo-modules",
+      "purpose": "module dependency diagnostics"
+    },
+    {
+      "name": "cargo-geiger",
+      "binary": "cargo-geiger",
+      "version": "0.13.0",
+      "required": false,
+      "install": "cargo install --locked --version 0.13.0 cargo-geiger",
+      "purpose": "optional report-only unsafe inventory"
+    }
+  ],
+  "measurement": {
+    "date": "2026-08-26",
+    "host": "aarch64-unknown-linux-gnu",
+    "rustc": "1.88.0",
+    "notes": [
+      "cargo-deny 0.20.2 is the newest release observed that accepts Rust 1.88 and parses the current advisory database's CVSS 4.0 records.",
+      "cargo-machete 0.9.2 was selected after its locked cargo-platform 0.3.2 requirement was verified with Rust 1.88.",
+      "cargo-modules 0.25.0 is the newest release observed with a Rust requirement no newer than the pinned 1.88 toolchain.",
+      "cargo-geiger is recorded for a future report-only check and is not required by the current fast/full profiles.",
+      "cargo-deny check advisories, bans, licenses, and sources passed against the current Linux-target lockfile graph with no exceptions.",
+      "cargo-machete 0.9.2 has no JSON output flag; --with-metadata --skip-target-dir found no unused direct dependencies.",
+      "cargo-modules 0.25.0 reports a CommandRequest::new graph cycle with the measured flags; module gating remains advisory pending WB-18."
+    ]
+  }
+}

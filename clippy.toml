@@ -1,0 +1,38 @@
+# DL-003: workspace path resolution and read/walk I/O belong in the
+# path_io adapter. Storage/config/statistics I/O is intentionally outside this
+# rule and remains covered by its own boundary work items.
+#
+# Rust/Clippy lint levels used by source are declared at the crate root and
+# checked against design-lint-manifest.json. This file contains the API deny
+# lists only; keeping levels out of Clippy's API-specific configuration avoids
+# a second source of truth for P0/P1 policy.
+disallowed-methods = [
+    # DL-002: process creation belongs in the platform process adapter.
+    "std::process::Command::new",
+    # DL-007: raw environment and current-directory reads belong in the
+    # platform environment adapter.
+    "std::env::var",
+    "std::env::var_os",
+    "std::env::vars",
+    "std::env::vars_os",
+    "std::env::current_dir",
+    "std::fs::canonicalize",
+    "std::path::Path::canonicalize",
+    "std::fs::read",
+    "std::fs::read_to_string",
+    "std::fs::read_dir",
+    "std::fs::File::open",
+    "std::fs::OpenOptions::open",
+]
+disallowed-macros = [
+    "std::print",
+    "std::println",
+    "std::eprint",
+    "std::eprintln",
+]
+
+# DL-002: importing or naming the process construction type outside the
+# platform adapter must be rejected as well as calling its constructor.
+disallowed-types = [
+    "std::process::Command",
+]

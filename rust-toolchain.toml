@@ -1,0 +1,5 @@
+[toolchain]
+# Keep the compiler and its built-in rustfmt/Clippy components reproducible.
+channel = "1.88.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
